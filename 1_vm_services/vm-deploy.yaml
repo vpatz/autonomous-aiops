@@ -73,6 +73,8 @@ stringData:
           [Service]
           Type=simple
           WorkingDirectory=/opt/aiops
+          Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://aiops-agent.my-vm-project.svc.cluster.local:4318
+          Environment=OTEL_SERVICE_NAME=%H
           ExecStart=/opt/aiops/start-service.sh
           Restart=no
 
