@@ -1,18 +1,17 @@
-"""AIOps demo app.
+"""Service app.
 
 GET /        page with a timer that starts when the page loads
 GET /health  whether this process is serving requests
 
 Metrics are pushed over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT
 (default http://192.168.64.1:4318) every OTEL_METRIC_EXPORT_INTERVAL ms.
-Host CPU and memory load are demo.cpu.load and demo.memory.load.
-The process exits at a random time within 5 minutes of start so the service goes down.
+Host CPU and memory load are service.cpu.load and service.memory.load.
+A random time within 5 minutes of start sends a dummy-crash metric instead of exiting.
 """
 
 import atexit
 import os
 import random
-import signal
 import socket
 import sys
 import threading
@@ -28,35 +27,13 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 
-os.environ.setdefault("OTEL_SERVICE_NAME", "aiops-demo-app")
+os.environ.setdefault("OTEL_SERVICE_NAME", "aiops-service-app")
 os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://192.168.64.1:4318")
 os.environ.setdefault("OTEL_METRIC_EXPORT_INTERVAL", "5000")
 
 app = Flask(__name__)
 STARTED_AT = time.time()
 
-
-def _parent_command(pid):
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as handle:
-            raw = handle.read()
-    except OSError:
-        return ""
-    return raw.replace(b"\x00", b" ").decode(errors="replace")
-
-
-def _crash_process():
-    delay = random.uniform(0, 5 * 60)
-    print(f"demo app will crash in {delay:.1f}s", file=sys.stderr, flush=True)
-    time.sleep(delay)
-    print("demo app crashing", file=sys.stderr, flush=True)
-    parent = os.getppid()
-    if parent > 1 and "gunicorn" in _parent_command(parent):
-        os.kill(parent, signal.SIGTERM)
-    os._exit(1)
-
-
-threading.Thread(target=_crash_process, name="demo-crash", daemon=True).start()
 
 _provider = MeterProvider(
     resource=Resource.create({"service.name": os.environ["OTEL_SERVICE_NAME"]}),
@@ -65,15 +42,31 @@ _provider = MeterProvider(
 metrics.set_meter_provider(_provider)
 atexit.register(_provider.shutdown)
 
-_meter = metrics.get_meter("aiops.demo.app")
+_meter = metrics.get_meter("aiops.service.app")
 page_loads = _meter.create_counter(
-    "demo.page.loads",
-    description="Times the demo page was served",
+    "service.page.loads",
+    description="Times the service page was served",
 )
 health_checks = _meter.create_counter(
     "health.checks",
     description="Times the health endpoint was called",
 )
+dummy_crash = _meter.create_counter(
+    "dummy-crash",
+    description="Dummy crash event sent instead of exiting the process",
+)
+
+
+def _send_dummy_crash():
+    delay = random.uniform(0, 5 * 60)
+    print(f"service app will send dummy-crash in {delay:.1f}s", file=sys.stderr, flush=True)
+    time.sleep(delay)
+    dummy_crash.add(1)
+    _provider.force_flush()
+    print("service app sent dummy-crash event", file=sys.stderr, flush=True)
+
+
+threading.Thread(target=_send_dummy_crash, name="dummy-crash", daemon=True).start()
 
 
 def _observe_uptime(_options):
@@ -130,19 +123,19 @@ def _observe_memory_load(_options):
 
 
 _meter.create_observable_gauge(
-    "demo.uptime",
+    "service.uptime",
     callbacks=[_observe_uptime],
     unit="s",
     description="Seconds since this process started",
 )
 _meter.create_observable_gauge(
-    "demo.cpu.load",
+    "service.cpu.load",
     callbacks=[_observe_cpu_load],
     unit="%",
     description="Host CPU utilization since the previous export",
 )
 _meter.create_observable_gauge(
-    "demo.memory.load",
+    "service.memory.load",
     callbacks=[_observe_memory_load],
     unit="%",
     description="Host memory in use, as a percentage of MemTotal",
@@ -154,7 +147,7 @@ PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AIOps demo app</title>
+  <title>AIOps service app</title>
   <style>
     :root { color-scheme: light; }
     body {
@@ -189,7 +182,7 @@ PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <main>
-    <h1>AIOps demo app</h1>
+    <h1>AIOps service app</h1>
     <p class="hint">Timer starts when this page loads.</p>
     <p class="timer" id="timer">00:00:00.0</p>
     <footer>Host {{ hostname }} · <a href="/health">health</a></footer>
