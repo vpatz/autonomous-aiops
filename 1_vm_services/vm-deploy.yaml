@@ -16,152 +16,23 @@ stringData:
     ssh_authorized_keys:
       - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDI4Ub3zmO1i1KR/BeMLOhbr0pZCraa3jjPMi0Gi2QFl+/NN8s0PRKwIuhT45OVwzt7ES75NbZn6o5mfUYttvLNVWKwTKI7nEfcLXMHZkvf3pKfFDiGIdb46J4/Fafc6K7IZ/8tI+oX5lSL6W19Gay04gZZ/I6fbW3k02ZAjMbLdblZkIIjGH1c+k4XnjQXz5WjiS1yqMMgS8BUzcSzS4xoU97PZreaTPyiM6TJ1na3hxtomiribPF0smbYdlPdC1zohVOHV5s82UngtE1c+yhLksUaXP8UVvsIyrJLabiwDT4D5nKudQHADK2MSoT0XYI1HSGUp4wMt5qr0O3NQlFzm6IzvobzUBX4GOca03RpyReYIOUux2jdUEKzYgnK4b4IfD3oDHIbr2/kaBIUK9nhpAjV1SNw0pdu43yD0T13wN3L3Zj8NS0yzB57sOX0R1xUcsX3HAT3Npz8eoYY290kjd4NeeafDW8C1YSGZZf885jOcEBY3ODJguCogoezJXE= vpathang@vpathang-mac
     write_files:
-      - path: /opt/aiops/service.py
+      - path: /etc/yum.repos.d/ubi10.repo
         owner: root:root
         permissions: "0644"
-        encoding: b64
         content: |
-          IiIiQUlPcHMgZGVtbyBhcHAuCgpHRVQgLyAgICAgICAgcGFnZSB3aXRoIGEgdGltZXIgdGhhdCBz
-          dGFydHMgd2hlbiB0aGUgcGFnZSBsb2FkcwpHRVQgL2hlYWx0aCAgd2hldGhlciB0aGlzIHByb2Nl
-          c3MgaXMgc2VydmluZyByZXF1ZXN0cwoKTWV0cmljcyBhcmUgcHVzaGVkIG92ZXIgT1RMUC9IVFRQ
-          IHRvIE9URUxfRVhQT1JURVJfT1RMUF9FTkRQT0lOVAooZGVmYXVsdCBodHRwOi8vMTkyLjE2OC42
-          NC4xOjQzMTgpIGV2ZXJ5IE9URUxfTUVUUklDX0VYUE9SVF9JTlRFUlZBTCBtcy4KSG9zdCBDUFUg
-          YW5kIG1lbW9yeSBsb2FkIGFyZSBkZW1vLmNwdS5sb2FkIGFuZCBkZW1vLm1lbW9yeS5sb2FkLgpU
-          aGUgcHJvY2VzcyBleGl0cyAxNSBzZWNvbmRzIGFmdGVyIHN0YXJ0IHNvIHRoZSBzZXJ2aWNlIGdv
-          ZXMgZG93bi4KIiIiCgppbXBvcnQgYXRleGl0CmltcG9ydCBvcwppbXBvcnQgc2lnbmFsCmltcG9y
-          dCBzb2NrZXQKaW1wb3J0IHN5cwppbXBvcnQgdGhyZWFkaW5nCmltcG9ydCB0aW1lCmZyb20gZGF0
-          ZXRpbWUgaW1wb3J0IGRhdGV0aW1lLCB0aW1lem9uZQoKZnJvbSBmbGFzayBpbXBvcnQgRmxhc2ss
-          IGpzb25pZnksIHJlbmRlcl90ZW1wbGF0ZV9zdHJpbmcsIHJlcXVlc3QKZnJvbSBvcGVudGVsZW1l
-          dHJ5IGltcG9ydCBtZXRyaWNzCmZyb20gb3BlbnRlbGVtZXRyeS5leHBvcnRlci5vdGxwLnByb3Rv
-          Lmh0dHAubWV0cmljX2V4cG9ydGVyIGltcG9ydCBPVExQTWV0cmljRXhwb3J0ZXIKZnJvbSBvcGVu
-          dGVsZW1ldHJ5Lmluc3RydW1lbnRhdGlvbi5mbGFzayBpbXBvcnQgRmxhc2tJbnN0cnVtZW50b3IK
-          ZnJvbSBvcGVudGVsZW1ldHJ5Lm1ldHJpY3MgaW1wb3J0IE9ic2VydmF0aW9uCmZyb20gb3BlbnRl
-          bGVtZXRyeS5zZGsubWV0cmljcyBpbXBvcnQgTWV0ZXJQcm92aWRlcgpmcm9tIG9wZW50ZWxlbWV0
-          cnkuc2RrLm1ldHJpY3MuZXhwb3J0IGltcG9ydCBQZXJpb2RpY0V4cG9ydGluZ01ldHJpY1JlYWRl
-          cgpmcm9tIG9wZW50ZWxlbWV0cnkuc2RrLnJlc291cmNlcyBpbXBvcnQgUmVzb3VyY2UKCm9zLmVu
-          dmlyb24uc2V0ZGVmYXVsdCgiT1RFTF9TRVJWSUNFX05BTUUiLCAiYWlvcHMtZGVtby1hcHAiKQpv
-          cy5lbnZpcm9uLnNldGRlZmF1bHQoIk9URUxfRVhQT1JURVJfT1RMUF9FTkRQT0lOVCIsICJodHRw
-          Oi8vMTkyLjE2OC42NC4xOjQzMTgiKQpvcy5lbnZpcm9uLnNldGRlZmF1bHQoIk9URUxfTUVUUklD
-          X0VYUE9SVF9JTlRFUlZBTCIsICI1MDAwIikKCmFwcCA9IEZsYXNrKF9fbmFtZV9fKQpTVEFSVEVE
-          X0FUID0gdGltZS50aW1lKCkKCgpkZWYgX3BhcmVudF9jb21tYW5kKHBpZCk6CiAgICB0cnk6CiAg
-          ICAgICAgd2l0aCBvcGVuKGYiL3Byb2Mve3BpZH0vY21kbGluZSIsICJyYiIpIGFzIGhhbmRsZToK
-          ICAgICAgICAgICAgcmF3ID0gaGFuZGxlLnJlYWQoKQogICAgZXhjZXB0IE9TRXJyb3I6CiAgICAg
-          ICAgcmV0dXJuICIiCiAgICByZXR1cm4gcmF3LnJlcGxhY2UoYiJceDAwIiwgYiIgIikuZGVjb2Rl
-          KGVycm9ycz0icmVwbGFjZSIpCgoKZGVmIF9jcmFzaF9wcm9jZXNzKCk6CiAgICBkZWxheSA9IDE1
-          CiAgICBwcmludChmImRlbW8gYXBwIHdpbGwgY3Jhc2ggaW4ge2RlbGF5Oi4xZn1zIiwgZmlsZT1z
-          eXMuc3RkZXJyLCBmbHVzaD1UcnVlKQogICAgdGltZS5zbGVlcChkZWxheSkKICAgIHByaW50KCJk
-          ZW1vIGFwcCBjcmFzaGluZyIsIGZpbGU9c3lzLnN0ZGVyciwgZmx1c2g9VHJ1ZSkKICAgIHBhcmVu
-          dCA9IG9zLmdldHBwaWQoKQogICAgaWYgcGFyZW50ID4gMSBhbmQgImd1bmljb3JuIiBpbiBfcGFy
-          ZW50X2NvbW1hbmQocGFyZW50KToKICAgICAgICBvcy5raWxsKHBhcmVudCwgc2lnbmFsLlNJR1RF
-          Uk0pCiAgICBvcy5fZXhpdCgxKQoKCnRocmVhZGluZy5UaHJlYWQodGFyZ2V0PV9jcmFzaF9wcm9j
-          ZXNzLCBuYW1lPSJkZW1vLWNyYXNoIiwgZGFlbW9uPVRydWUpLnN0YXJ0KCkKCl9wcm92aWRlciA9
-          IE1ldGVyUHJvdmlkZXIoCiAgICByZXNvdXJjZT1SZXNvdXJjZS5jcmVhdGUoeyJzZXJ2aWNlLm5h
-          bWUiOiBvcy5lbnZpcm9uWyJPVEVMX1NFUlZJQ0VfTkFNRSJdfSksCiAgICBtZXRyaWNfcmVhZGVy
-          cz1bUGVyaW9kaWNFeHBvcnRpbmdNZXRyaWNSZWFkZXIoT1RMUE1ldHJpY0V4cG9ydGVyKCkpXSwK
-          KQptZXRyaWNzLnNldF9tZXRlcl9wcm92aWRlcihfcHJvdmlkZXIpCmF0ZXhpdC5yZWdpc3Rlcihf
-          cHJvdmlkZXIuc2h1dGRvd24pCgpfbWV0ZXIgPSBtZXRyaWNzLmdldF9tZXRlcigiYWlvcHMuZGVt
-          by5hcHAiKQpwYWdlX2xvYWRzID0gX21ldGVyLmNyZWF0ZV9jb3VudGVyKAogICAgImRlbW8ucGFn
-          ZS5sb2FkcyIsCiAgICBkZXNjcmlwdGlvbj0iVGltZXMgdGhlIGRlbW8gcGFnZSB3YXMgc2VydmVk
-          IiwKKQpoZWFsdGhfY2hlY2tzID0gX21ldGVyLmNyZWF0ZV9jb3VudGVyKAogICAgImhlYWx0aC5j
-          aGVja3MiLAogICAgZGVzY3JpcHRpb249IlRpbWVzIHRoZSBoZWFsdGggZW5kcG9pbnQgd2FzIGNh
-          bGxlZCIsCikKCgpkZWYgX29ic2VydmVfdXB0aW1lKF9vcHRpb25zKToKICAgIHlpZWxkIE9ic2Vy
-          dmF0aW9uKG1heCgwLjAsIHRpbWUudGltZSgpIC0gU1RBUlRFRF9BVCkpCgoKZGVmIF9jcHVfdGlt
-          ZXMoKToKICAgIHdpdGggb3BlbigiL3Byb2Mvc3RhdCIsIGVuY29kaW5nPSJhc2NpaSIpIGFzIGhh
-          bmRsZToKICAgICAgICBmaWVsZHMgPSBbaW50KHZhbHVlKSBmb3IgdmFsdWUgaW4gaGFuZGxlLnJl
-          YWRsaW5lKCkuc3BsaXQoKVsxOl1dCiAgICBpZGxlID0gZmllbGRzWzNdICsgKGZpZWxkc1s0XSBp
-          ZiBsZW4oZmllbGRzKSA+IDQgZWxzZSAwKQogICAgcmV0dXJuIHN1bShmaWVsZHMpLCBpZGxlCgoK
-          ZGVmIF9tZW1vcnlfdXNlZF9wZXJjZW50KCk6CiAgICBtZW1pbmZvID0ge30KICAgIHdpdGggb3Bl
-          bigiL3Byb2MvbWVtaW5mbyIsIGVuY29kaW5nPSJhc2NpaSIpIGFzIGhhbmRsZToKICAgICAgICBm
-          b3IgbGluZSBpbiBoYW5kbGU6CiAgICAgICAgICAgIGtleSwgcmF3ID0gbGluZS5zcGxpdCgiOiIs
-          IDEpCiAgICAgICAgICAgIG1lbWluZm9ba2V5XSA9IGludChyYXcuc3BsaXQoKVswXSkKICAgIHRv
-          dGFsID0gbWVtaW5mb1siTWVtVG90YWwiXQogICAgYXZhaWxhYmxlID0gbWVtaW5mby5nZXQoIk1l
-          bUF2YWlsYWJsZSIsIG1lbWluZm9bIk1lbUZyZWUiXSkKICAgIGlmIHRvdGFsIDw9IDA6CiAgICAg
-          ICAgcmV0dXJuIDAuMAogICAgcmV0dXJuIDEwMC4wICogKHRvdGFsIC0gYXZhaWxhYmxlKSAvIHRv
-          dGFsCgoKX2NwdV9zYW1wbGUgPSB7InRvdGFsIjogTm9uZSwgImlkbGUiOiBOb25lLCAicGVyY2Vu
-          dCI6IDAuMH0KCgpkZWYgX29ic2VydmVfY3B1X2xvYWQoX29wdGlvbnMpOgogICAgdHJ5OgogICAg
-          ICAgIHRvdGFsLCBpZGxlID0gX2NwdV90aW1lcygpCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAg
-          ICB5aWVsZCBPYnNlcnZhdGlvbihfY3B1X3NhbXBsZVsicGVyY2VudCJdKQogICAgICAgIHJldHVy
-          bgogICAgcHJldmlvdXNfdG90YWwgPSBfY3B1X3NhbXBsZVsidG90YWwiXQogICAgcHJldmlvdXNf
-          aWRsZSA9IF9jcHVfc2FtcGxlWyJpZGxlIl0KICAgIF9jcHVfc2FtcGxlWyJ0b3RhbCJdID0gdG90
-          YWwKICAgIF9jcHVfc2FtcGxlWyJpZGxlIl0gPSBpZGxlCiAgICBpZiBwcmV2aW91c190b3RhbCBp
-          cyBub3QgTm9uZToKICAgICAgICBkZWx0YV90b3RhbCA9IHRvdGFsIC0gcHJldmlvdXNfdG90YWwK
-          ICAgICAgICBkZWx0YV9pZGxlID0gaWRsZSAtIHByZXZpb3VzX2lkbGUKICAgICAgICBpZiBkZWx0
-          YV90b3RhbCA+IDA6CiAgICAgICAgICAgIF9jcHVfc2FtcGxlWyJwZXJjZW50Il0gPSAxMDAuMCAq
-          IChkZWx0YV90b3RhbCAtIGRlbHRhX2lkbGUpIC8gZGVsdGFfdG90YWwKICAgIHlpZWxkIE9ic2Vy
-          dmF0aW9uKF9jcHVfc2FtcGxlWyJwZXJjZW50Il0pCgoKZGVmIF9vYnNlcnZlX21lbW9yeV9sb2Fk
-          KF9vcHRpb25zKToKICAgIHRyeToKICAgICAgICB1c2VkX3BlcmNlbnQgPSBfbWVtb3J5X3VzZWRf
-          cGVyY2VudCgpCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICByZXR1cm4KICAgIHlpZWxkIE9i
-          c2VydmF0aW9uKHVzZWRfcGVyY2VudCkKCgpfbWV0ZXIuY3JlYXRlX29ic2VydmFibGVfZ2F1Z2Uo
-          CiAgICAiZGVtby51cHRpbWUiLAogICAgY2FsbGJhY2tzPVtfb2JzZXJ2ZV91cHRpbWVdLAogICAg
-          dW5pdD0icyIsCiAgICBkZXNjcmlwdGlvbj0iU2Vjb25kcyBzaW5jZSB0aGlzIHByb2Nlc3Mgc3Rh
-          cnRlZCIsCikKX21ldGVyLmNyZWF0ZV9vYnNlcnZhYmxlX2dhdWdlKAogICAgImRlbW8uY3B1Lmxv
-          YWQiLAogICAgY2FsbGJhY2tzPVtfb2JzZXJ2ZV9jcHVfbG9hZF0sCiAgICB1bml0PSIlIiwKICAg
-          IGRlc2NyaXB0aW9uPSJIb3N0IENQVSB1dGlsaXphdGlvbiBzaW5jZSB0aGUgcHJldmlvdXMgZXhw
-          b3J0IiwKKQpfbWV0ZXIuY3JlYXRlX29ic2VydmFibGVfZ2F1Z2UoCiAgICAiZGVtby5tZW1vcnku
-          bG9hZCIsCiAgICBjYWxsYmFja3M9W19vYnNlcnZlX21lbW9yeV9sb2FkXSwKICAgIHVuaXQ9IiUi
-          LAogICAgZGVzY3JpcHRpb249Ikhvc3QgbWVtb3J5IGluIHVzZSwgYXMgYSBwZXJjZW50YWdlIG9m
-          IE1lbVRvdGFsIiwKKQpGbGFza0luc3RydW1lbnRvcigpLmluc3RydW1lbnRfYXBwKGFwcCkKClBB
-          R0UgPSAiIiI8IURPQ1RZUEUgaHRtbD4KPGh0bWwgbGFuZz0iZW4iPgo8aGVhZD4KICA8bWV0YSBj
-          aGFyc2V0PSJ1dGYtOCI+CiAgPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRl
-          dmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xIj4KICA8dGl0bGU+QUlPcHMgZGVtbyBhcHA8L3Rp
-          dGxlPgogIDxzdHlsZT4KICAgIDpyb290IHsgY29sb3Itc2NoZW1lOiBsaWdodDsgfQogICAgYm9k
-          eSB7CiAgICAgIG1hcmdpbjogMDsKICAgICAgbWluLWhlaWdodDogMTAwdmg7CiAgICAgIGRpc3Bs
-          YXk6IGdyaWQ7CiAgICAgIHBsYWNlLWl0ZW1zOiBjZW50ZXI7CiAgICAgIGJhY2tncm91bmQ6ICNm
-          NGY2Zjg7CiAgICAgIGNvbG9yOiAjMWYyOTMzOwogICAgICBmb250LWZhbWlseTogIlNlZ29lIFVJ
-          IiwgSGVsdmV0aWNhLCBBcmlhbCwgc2Fucy1zZXJpZjsKICAgIH0KICAgIG1haW4gewogICAgICB3
-          aWR0aDogbWluKDMycmVtLCBjYWxjKDEwMCUgLSAycmVtKSk7CiAgICAgIGJhY2tncm91bmQ6ICNm
-          ZmY7CiAgICAgIGJvcmRlcjogMXB4IHNvbGlkICNlMmU4ZjA7CiAgICAgIGJvcmRlci1yYWRpdXM6
-          IDEycHg7CiAgICAgIHBhZGRpbmc6IDJyZW07CiAgICAgIGJveC1zaGFkb3c6IDAgOHB4IDI0cHgg
-          cmdiYSgxNSwgMjMsIDQyLCAwLjA2KTsKICAgIH0KICAgIGgxIHsgbWFyZ2luOiAwIDAgMC4yNXJl
-          bTsgZm9udC1zaXplOiAxLjM1cmVtOyB9CiAgICAuaGludCB7IG1hcmdpbjogMCAwIDEuNXJlbTsg
-          Y29sb3I6ICM1MjYwNmQ7IH0KICAgIC50aW1lciB7CiAgICAgIGZvbnQtdmFyaWFudC1udW1lcmlj
-          OiB0YWJ1bGFyLW51bXM7CiAgICAgIGZvbnQtc2l6ZTogM3JlbTsKICAgICAgZm9udC13ZWlnaHQ6
-          IDY1MDsKICAgICAgbGV0dGVyLXNwYWNpbmc6IDAuMDRlbTsKICAgICAgbWFyZ2luOiAwOwogICAg
-          fQogICAgZm9vdGVyIHsgbWFyZ2luLXRvcDogMS41cmVtOyBmb250LXNpemU6IDAuOXJlbTsgfQog
-          ICAgYSB7IGNvbG9yOiAjMGI1ZmZmOyB9CiAgPC9zdHlsZT4KPC9oZWFkPgo8Ym9keT4KICA8bWFp
-          bj4KICAgIDxoMT5BSU9wcyBkZW1vIGFwcDwvaDE+CiAgICA8cCBjbGFzcz0iaGludCI+VGltZXIg
-          c3RhcnRzIHdoZW4gdGhpcyBwYWdlIGxvYWRzLjwvcD4KICAgIDxwIGNsYXNzPSJ0aW1lciIgaWQ9
-          InRpbWVyIj4wMDowMDowMC4wPC9wPgogICAgPGZvb3Rlcj5Ib3N0IHt7IGhvc3RuYW1lIH19IMK3
-          IDxhIGhyZWY9Ii9oZWFsdGgiPmhlYWx0aDwvYT48L2Zvb3Rlcj4KICA8L21haW4+CiAgPHNjcmlw
-          dD4KICAgIGNvbnN0IHN0YXJ0ZWQgPSBwZXJmb3JtYW5jZS5ub3coKTsKICAgIGNvbnN0IHBhZCA9
-          IChuKSA9PiBTdHJpbmcobikucGFkU3RhcnQoMiwgIjAiKTsKICAgIGNvbnN0IHRpbWVyID0gZG9j
-          dW1lbnQuZ2V0RWxlbWVudEJ5SWQoInRpbWVyIik7CgogICAgZnVuY3Rpb24gdGljaygpIHsKICAg
-          ICAgY29uc3QgbXMgPSBwZXJmb3JtYW5jZS5ub3coKSAtIHN0YXJ0ZWQ7CiAgICAgIGNvbnN0IHRv
-          dGFsID0gTWF0aC5mbG9vcihtcyAvIDEwMCk7CiAgICAgIGNvbnN0IHRlbnRocyA9IHRvdGFsICUg
-          MTA7CiAgICAgIGNvbnN0IHNlY29uZHMgPSBNYXRoLmZsb29yKHRvdGFsIC8gMTApOwogICAgICB0
-          aW1lci50ZXh0Q29udGVudCA9IHBhZChNYXRoLmZsb29yKHNlY29uZHMgLyAzNjAwKSkgKyAiOiIK
-          ICAgICAgICArIHBhZChNYXRoLmZsb29yKChzZWNvbmRzICUgMzYwMCkgLyA2MCkpICsgIjoiCiAg
-          ICAgICAgKyBwYWQoc2Vjb25kcyAlIDYwKSArICIuIiArIHRlbnRoczsKICAgICAgcmVxdWVzdEFu
-          aW1hdGlvbkZyYW1lKHRpY2spOwogICAgfQogICAgdGljaygpOwogIDwvc2NyaXB0Pgo8L2JvZHk+
-          CjwvaHRtbD4KIiIiCgoKZGVmIF9oZWFsdGhfcGF5bG9hZCgpOgogICAgdXB0aW1lID0gdGltZS50
-          aW1lKCkgLSBTVEFSVEVEX0FUCiAgICBydW5uaW5nID0gdXB0aW1lID49IDAKICAgIHJldHVybiB7
-          CiAgICAgICAgInN0YXR1cyI6ICJvayIgaWYgcnVubmluZyBlbHNlICJub3Qgb2siLAogICAgICAg
-          ICJkZXRhaWwiOiAic2VydmljZSBpcyBydW5uaW5nIiBpZiBydW5uaW5nIGVsc2UgInNlcnZpY2Ug
-          aXMgbm90IHJ1bm5pbmciLAogICAgICAgICJ1cHRpbWVfc2Vjb25kcyI6IHJvdW5kKHVwdGltZSwg
-          MSksCiAgICAgICAgInRpbWVzdGFtcCI6IGRhdGV0aW1lLm5vdyh0aW1lem9uZS51dGMpLmlzb2Zv
-          cm1hdCgpLAogICAgfQoKCkBhcHAuZ2V0KCIvIikKZGVmIHdvcmtsb2FkKCk6CiAgICBwYWdlX2xv
-          YWRzLmFkZCgxKQogICAgcmV0dXJuIHJlbmRlcl90ZW1wbGF0ZV9zdHJpbmcoUEFHRSwgaG9zdG5h
-          bWU9c29ja2V0LmdldGhvc3RuYW1lKCkpCgoKQGFwcC5nZXQoIi9oZWFsdGgiKQpkZWYgaGVhbHRo
-          KCk6CiAgICBwYXlsb2FkID0gX2hlYWx0aF9wYXlsb2FkKCkKICAgIGNvZGUgPSAyMDAgaWYgcGF5
-          bG9hZFsic3RhdHVzIl0gPT0gIm9rIiBlbHNlIDUwMwogICAgaGVhbHRoX2NoZWNrcy5hZGQoMSwg
-          eyJzdGF0dXMiOiBwYXlsb2FkWyJzdGF0dXMiXX0pCiAgICBiZXN0ID0gcmVxdWVzdC5hY2NlcHRf
-          bWltZXR5cGVzLmJlc3RfbWF0Y2goWyJhcHBsaWNhdGlvbi9qc29uIiwgInRleHQvaHRtbCJdLCBk
-          ZWZhdWx0PSJhcHBsaWNhdGlvbi9qc29uIikKICAgIGlmIGJlc3QgPT0gInRleHQvaHRtbCIgYW5k
-          ICJ0ZXh0L2h0bWwiIGluIHJlcXVlc3QuaGVhZGVycy5nZXQoIkFjY2VwdCIsICIiKToKICAgICAg
-          ICBjb2xvciA9ICIjMGY3YjNhIiBpZiBjb2RlID09IDIwMCBlbHNlICIjYjQyMzE4IgogICAgICAg
-          IGxhYmVsID0gIk9LIiBpZiBjb2RlID09IDIwMCBlbHNlICJOT1QgT0siCiAgICAgICAgcGFnZSA9
-          IGYiIiI8IURPQ1RZUEUgaHRtbD4KPGh0bWwgbGFuZz0iZW4iPjxoZWFkPjxtZXRhIGNoYXJzZXQ9
-          InV0Zi04Ij48dGl0bGU+SGVhbHRoPC90aXRsZT4KPHN0eWxlPgogIGJvZHkge3sgZm9udC1mYW1p
-          bHk6ICJTZWdvZSBVSSIsIEhlbHZldGljYSwgQXJpYWwsIHNhbnMtc2VyaWY7IGRpc3BsYXk6IGdy
-          aWQ7IHBsYWNlLWl0ZW1zOiBjZW50ZXI7IG1pbi1oZWlnaHQ6IDEwMHZoOyBtYXJnaW46IDA7IGJh
-          Y2tncm91bmQ6ICNmNGY2Zjg7IH19CiAgbWFpbiB7eyBiYWNrZ3JvdW5kOiAjZmZmOyBib3JkZXI6
-          IDFweCBzb2xpZCAjZTJlOGYwOyBib3JkZXItcmFkaXVzOiAxMnB4OyBwYWRkaW5nOiAycmVtIDNy
-          ZW07IHRleHQtYWxpZ246IGNlbnRlcjsgfX0KICBoMSB7eyBtYXJnaW46IDA7IGNvbG9yOiB7Y29s
-          b3J9OyB9fQogIHAge3sgY29sb3I6ICM1MjYwNmQ7IH19Cjwvc3R5bGU+PC9oZWFkPgo8Ym9keT48
-          bWFpbj48aDE+e2xhYmVsfTwvaDE+PHA+e3BheWxvYWRbImRldGFpbCJdfTwvcD48L21haW4+PC9i
-          b2R5PjwvaHRtbD4iIiIKICAgICAgICByZXR1cm4gcGFnZSwgY29kZQogICAgcmV0dXJuIGpzb25p
-          ZnkocGF5bG9hZCksIGNvZGUKCgppZiBfX25hbWVfXyA9PSAiX19tYWluX18iOgogICAgYXBwLnJ1
-          bihob3N0PSIwLjAuMC4wIiwgcG9ydD01MDAwKQo=
+          [ubi-10-baseos-rpms]
+          name=Red Hat Universal Base Image 10 (RPMs) - BaseOS
+          baseurl=https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/x86_64/baseos/os
+          enabled=1
+          gpgcheck=1
+          gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
+
+          [ubi-10-appstream-rpms]
+          name=Red Hat Universal Base Image 10 (RPMs) - AppStream
+          baseurl=https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/x86_64/appstream/os
+          enabled=1
+          gpgcheck=1
+          gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release
       - path: /opt/aiops/setup.sh
         owner: root:root
         permissions: "0755"
@@ -169,8 +40,9 @@ stringData:
           #!/bin/bash
           set -euxo pipefail
           exec > /var/log/aiops-setup.log 2>&1
+          dnf install -y git
           python3 -m venv --without-pip /opt/aiops/venv
-          curl -fsSL https://bootstrap.pypa.io/pip/3.9/get-pip.py -o /tmp/get-pip.py
+          curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
           /opt/aiops/venv/bin/python /tmp/get-pip.py
           /opt/aiops/venv/bin/python -m pip install --disable-pip-version-check \
             "flask==3.0.3" \
@@ -180,6 +52,15 @@ stringData:
             "opentelemetry-instrumentation-flask==0.62b1"
           systemctl daemon-reload
           systemctl enable --now aiops-demo.service
+      - path: /opt/aiops/start-service.sh
+        owner: root:root
+        permissions: "0755"
+        content: |
+          #!/bin/bash
+          set -euxo pipefail
+          rm -rf /opt/aiops/src
+          git clone --depth 1 https://github.com/vpatz/autonomous-aiops.git /opt/aiops/src
+          exec /opt/aiops/venv/bin/python /opt/aiops/src/1_vm_services/service.py
       - path: /etc/systemd/system/aiops-demo.service
         owner: root:root
         permissions: "0644"
@@ -192,7 +73,7 @@ stringData:
           [Service]
           Type=simple
           WorkingDirectory=/opt/aiops
-          ExecStart=/opt/aiops/venv/bin/python /opt/aiops/service.py
+          ExecStart=/opt/aiops/start-service.sh
           Restart=no
 
           [Install]
@@ -203,14 +84,14 @@ stringData:
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: rhel9-production-vm-1
+  name: rhel10-service-1
   namespace: my-vm-project
 spec:
   running: true
   template:
     metadata:
       labels:
-        kubevirt.io/domain: rhel9-production-vm-1
+        kubevirt.io/domain: rhel10-service-1
     spec:
       domain:
         cpu:
@@ -234,7 +115,7 @@ spec:
           pod: {}
       volumes:
         - dataVolume:
-            name: rhel9-root-volume-1
+            name: rhel10-root-volume-1
           name: rootdisk
         - cloudInitNoCloud:
             secretRef:
@@ -242,11 +123,11 @@ spec:
           name: cloudinitdisk
   dataVolumeTemplates:
     - metadata:
-        name: rhel9-root-volume-1
+        name: rhel10-root-volume-1
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel9
+          name: rhel10
           namespace: openshift-virtualization-os-images
         storage:
           accessModes:
@@ -259,14 +140,14 @@ spec:
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: rhel9-production-vm-2
+  name: rhel10-service-2
   namespace: my-vm-project
 spec:
   running: true
   template:
     metadata:
       labels:
-        kubevirt.io/domain: rhel9-production-vm-2
+        kubevirt.io/domain: rhel10-service-2
     spec:
       domain:
         cpu:
@@ -290,7 +171,7 @@ spec:
           pod: {}
       volumes:
         - dataVolume:
-            name: rhel9-root-volume-2
+            name: rhel10-root-volume-2
           name: rootdisk
         - cloudInitNoCloud:
             secretRef:
@@ -298,11 +179,11 @@ spec:
           name: cloudinitdisk
   dataVolumeTemplates:
     - metadata:
-        name: rhel9-root-volume-2
+        name: rhel10-root-volume-2
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel9
+          name: rhel10
           namespace: openshift-virtualization-os-images
         storage:
           accessModes:
@@ -315,14 +196,14 @@ spec:
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: rhel9-production-vm-3
+  name: rhel10-service-3
   namespace: my-vm-project
 spec:
   running: true
   template:
     metadata:
       labels:
-        kubevirt.io/domain: rhel9-production-vm-3
+        kubevirt.io/domain: rhel10-service-3
     spec:
       domain:
         cpu:
@@ -346,7 +227,7 @@ spec:
           pod: {}
       volumes:
         - dataVolume:
-            name: rhel9-root-volume-3
+            name: rhel10-root-volume-3
           name: rootdisk
         - cloudInitNoCloud:
             secretRef:
@@ -354,11 +235,11 @@ spec:
           name: cloudinitdisk
   dataVolumeTemplates:
     - metadata:
-        name: rhel9-root-volume-3
+        name: rhel10-root-volume-3
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel9
+          name: rhel10
           namespace: openshift-virtualization-os-images
         storage:
           accessModes:
@@ -371,14 +252,14 @@ spec:
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: rhel9-production-vm-4
+  name: rhel10-service-4
   namespace: my-vm-project
 spec:
   running: true
   template:
     metadata:
       labels:
-        kubevirt.io/domain: rhel9-production-vm-4
+        kubevirt.io/domain: rhel10-service-4
     spec:
       domain:
         cpu:
@@ -402,7 +283,7 @@ spec:
           pod: {}
       volumes:
         - dataVolume:
-            name: rhel9-root-volume-4
+            name: rhel10-root-volume-4
           name: rootdisk
         - cloudInitNoCloud:
             secretRef:
@@ -410,11 +291,11 @@ spec:
           name: cloudinitdisk
   dataVolumeTemplates:
     - metadata:
-        name: rhel9-root-volume-4
+        name: rhel10-root-volume-4
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel9
+          name: rhel10
           namespace: openshift-virtualization-os-images
         storage:
           accessModes:
