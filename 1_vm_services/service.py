@@ -6,11 +6,12 @@ GET /health  whether this process is serving requests
 Metrics are pushed over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT
 (default http://192.168.64.1:4318) every OTEL_METRIC_EXPORT_INTERVAL ms.
 Host CPU and memory load are demo.cpu.load and demo.memory.load.
-The process exits 15 seconds after start so the service goes down.
+The process exits at a random time within 5 minutes of start so the service goes down.
 """
 
 import atexit
 import os
+import random
 import signal
 import socket
 import sys
@@ -45,7 +46,7 @@ def _parent_command(pid):
 
 
 def _crash_process():
-    delay = 15
+    delay = random.uniform(0, 5 * 60)
     print(f"demo app will crash in {delay:.1f}s", file=sys.stderr, flush=True)
     time.sleep(delay)
     print("demo app crashing", file=sys.stderr, flush=True)
