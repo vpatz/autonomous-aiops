@@ -109,5 +109,3 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   remediation and LLM reasoning are off until those are provided.
 - `2_aiops_agent/agent-pod.yaml` sets only `EDA_EVENT_PASSWORD` (value `collect-only`)
   and no `EDA_EVENT_URL`, so stage-2 EDA posting is disabled until a URL is added.
-- `UnUsed/` holds decommissioned manifests (e.g. the OpenShift Virtualization operator
-  setup); they are not part of the active deployment.

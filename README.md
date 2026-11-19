@@ -92,4 +92,3 @@ servers), and the deployed mode.
 | `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
 | `2_aiops_agent/` | earlier single-loop demo: silence detection -> EDA restart event |
 | `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
-| `UnUsed/` | decommissioned manifests |
