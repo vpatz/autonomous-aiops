@@ -1967,7 +1967,10 @@ data:
                         "iteration": iteration,
                         "tool": tool,
                         "arguments": arguments,
-                        "output": truncate(output),
+                        # Keep (nearly) the full output for the conclusion step:
+                        # fault lines sit at the end of journal output, past what
+                        # fits in a dashboard finding. Display points truncate.
+                        "output": truncate(output, limit=50000),
                         "status": status,
                     }
                     finding = (
