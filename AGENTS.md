@@ -97,6 +97,11 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Everything deploys into namespace `my-vm-project`: VMs `rhel10-service-1..4`, the
   `linux-mcp` deployment (SSH access to the VMs) + Service/Route, `aiops-agent`
   (stage 2) and `aiops-workflow` (stage 3) pods with Service/Route on 4318.
+- Credentials never live in this repo (history was scrubbed once; keep it that way):
+  the `linux-mcp-ssh` secret must be created out-of-band (`oc create secret generic
+  linux-mcp-ssh -n my-vm-project --from-file=id_ed25519=...`) and the VM console
+  password must be set in the `rhel9-cloudinit` userdata before applying
+  `vm-deploy.yaml`.
 - VM telemetry targets `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`
   (stage 3). To demo stage 2 instead, point the systemd `OTEL_EXPORTER_OTLP_ENDPOINT`
   in `vm-deploy.yaml` back at `aiops-agent` and re-create the VMs.

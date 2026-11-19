@@ -1,3 +1,5 @@
+# The rhel9-cloudinit userdata below sets the VM console password. Set a real
+# value before applying; credentials must never be committed to this repo.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -8,7 +10,7 @@ stringData:
   userdata: |
     #cloud-config
     user: rheluser
-    password: REDACTED-VM-PASSWORD
+    password: REPLACE_WITH_VM_PASSWORD
     chpasswd: { expire: false }
     ssh_pwauth: true
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -308,15 +310,13 @@ spec:
               storage: 40Gi
           storageClassName: ocs-external-storagecluster-ceph-rbd
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: linux-mcp-ssh
-  namespace: my-vm-project
-type: Opaque
-stringData:
-  id_ed25519: |
-    REDACTED-PRIVATE-KEY
+# The linux-mcp deployment mounts the linux-mcp-ssh secret. Create it
+# out-of-band so the private key never lives in git:
+#   ssh-keygen -t ed25519 -f mcp_id_ed25519 -C mcp@rhel
+#   oc create secret generic linux-mcp-ssh -n my-vm-project \
+#     --from-file=id_ed25519=mcp_id_ed25519
+# Add the matching public key to ssh_authorized_keys in the rhel9-cloudinit
+# userdata above before applying this manifest.
 ---
 apiVersion: v1
 kind: ConfigMap

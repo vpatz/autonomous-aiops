@@ -62,18 +62,25 @@ servers), and the deployed mode.
 
 ## Infra setup (OpenShift Virtualization)
 
-1. Deploy the VMs and the linux-mcp server:
+1. Create the secret the linux-mcp server uses to reach the VMs (private
+   keys never live in this repo):
+   `ssh-keygen -t ed25519 -f mcp_id_ed25519 -C mcp@rhel`
+   `oc create secret generic linux-mcp-ssh -n my-vm-project --from-file=id_ed25519=mcp_id_ed25519`
+   Then add the matching public key to `ssh_authorized_keys` and set the VM
+   console password in the `rhel9-cloudinit` userdata of
+   `1_vm_services/vm-deploy.yaml`.
+2. Deploy the VMs and the linux-mcp server:
    `oc apply -f 1_vm_services/vm-deploy.yaml`
    (4 RHEL 10 VMs; each boots, clones this repo and runs
    `1_vm_services/service.py` as `aiops-demo.service`, pushing telemetry to
    `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`)
-2. Deploy the multi-agent workflow:
+3. Deploy the multi-agent workflow:
    `oc apply -f 3_langgraph_workflow/workflow-pod.yaml`
    (collector + agents + dashboard on :4318; talks to linux-mcp in-cluster)
-3. Point the workflow at an LLM endpoint (optional) and an Ansible MCP
+4. Point the workflow at an LLM endpoint (optional) and an Ansible MCP
    server (required for real remediation) via the pod environment:
    `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`, `ANSIBLE_MCP_URL`.
-4. The service in each VM emits a `dummy-crash` fault (metric + ERROR log +
+5. The service in each VM emits a `dummy-crash` fault (metric + ERROR log +
    failed span) at a random time (set `DUMMY_CRASH_MAX_DELAY_SECONDS` to
    control it). The workflow detects, investigates, remediates and verifies
    it; watch the dashboard at the `aiops-workflow` route.
