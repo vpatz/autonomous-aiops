@@ -11,7 +11,7 @@ Injects failure scenarios randomly into one or more VMs, concurrently:
                        BEFORE the outage so it is self-healing
   4. restart-vm        delete the VMI; the VM controller recreates it (reboot)
   5. shutdown-vm       set spec.running=false (stays down)
-  6. block-telemetry   iptables REJECT on VM egress to port 4318 for
+  6. block-telemetry   an nftables reject rule on VM egress to port 4318 for
                        --telemetry-seconds (default 30); self-healing timer
   7. alter-telemetry   block the real telemetry and publish fake OTLP
                        metrics under the service's name for --duration
@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 STEP = "chaos injector"
 SERVICE_UNIT = "aiops-demo.service"
-SSH_PORT = 4318  # the collector port blocked by block-telemetry/alter-telemetry
+COLLECTOR_PORT = 4318  # the telemetry port blocked by block/alter-telemetry
 OTLP_INTERVAL_SECONDS = 5
 DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
 
@@ -104,10 +104,10 @@ class Runner:
             return 0, "dry-run"
         print(f"[{STEP}] {detail}", flush=True)
         code, output = run_argv(argv)
-        if code != 0 and not tolerate_failure:
-            # A dropped connection is expected when the command itself cuts
-            # networking; anything else is reported but not fatal.
+        if code != 0:
             print(f"[{STEP}] ssh exit {code}: {output[:200]}", flush=True)
+            if not tolerate_failure:
+                raise ChaosError(f"ssh command failed on {vm}: {command[:120]}")
         return code, output
 
     def oc(self, args, why):
@@ -120,6 +120,7 @@ class Runner:
         code, output = run_argv(["oc"] + args)
         if code != 0:
             print(f"[{STEP}] oc exit {code}: {output[:200]}", flush=True)
+            raise ChaosError(f"oc command failed: {' '.join(args)[:120]}")
         return code, output
 
     def otlp(self, vm, values, seconds, why):
@@ -129,6 +130,8 @@ class Runner:
             print(f"[{STEP}] (dry-run) {detail}", flush=True)
             return
         print(f"[{STEP}] {detail}", flush=True)
+        if not self.cfg.collector_url:
+            self.cfg.collector_url = discover_collector_url(self.cfg)
         url = self.cfg.collector_url.rstrip("/") + "/v1/metrics"
         deadline = time.monotonic() + max(1, seconds)
         while time.monotonic() < deadline:
@@ -213,11 +216,17 @@ def scenario_shutdown_vm(vm, runner, cfg):
 
 def _block_telemetry(vm, runner, cfg, seconds):
     unit = _unit_tag("chaos-tel-restore", vm)
+    # Schedule the recovery FIRST: once traffic to the collector is blocked,
+    # nothing outside the VM can undo it. RHEL 10 has no iptables binary;
+    # the block is a dedicated nftables table that recovery deletes whole.
     runner.ssh(vm, f"sudo -n systemd-run --on-active={seconds} --unit={unit} "
-                   f"iptables -D OUTPUT -p tcp --dport {SSH_PORT} -j REJECT",
+                   f"nft delete table inet chaos",
                f"schedule telemetry unblock in {seconds}s (before the block)")
-    runner.ssh(vm, f"sudo -n iptables -I OUTPUT -p tcp --dport {SSH_PORT} -j REJECT",
-               f"block telemetry egress (port {SSH_PORT}) for {seconds}s")
+    runner.ssh(vm,
+               "sudo -n nft add table inet chaos"
+               " && sudo -n nft add chain inet chaos out '{ type filter hook output priority 0; }'"
+               f" && sudo -n nft add rule inet chaos out tcp dport {COLLECTOR_PORT} reject",
+               f"block telemetry egress (port {COLLECTOR_PORT}) for {seconds}s")
 
 
 def scenario_block_telemetry(vm, runner, cfg):
@@ -329,7 +338,7 @@ def run_round(index, total, scenario_name, targets, cfg):
     results = {}
 
     def inject(vm):
-        runner = Runner(cfg)
+        runner = Runner(cfg, record_only=cfg.dry_run)
         try:
             SCENARIOS_BY_NAME[scenario_name]["run"](vm, runner, cfg)
             return vm, True, ""
@@ -393,13 +402,13 @@ def main():
     args.vms = [name for group in args.vm for name in group.split(",") if name.strip()]
     rng = random.Random(args.seed)
 
-    if not args.collector_url:
-        args.collector_url = discover_collector_url(args)
     if not args.vms:
         available = discover_vms(args)
         print(f"[{STEP}] discovered VMs: {', '.join(available)}", flush=True)
     else:
         available = args.vms
+    # The collector route is discovered lazily, only when fake telemetry
+    # actually needs to be posted (dry-runs work without reaching it).
 
     if args.dry_run:
         # Render one round of every scenario when the selection is random.
@@ -498,12 +507,12 @@ def self_check():
 
     block = record("block-telemetry")
     ssh_details = [item["detail"] for item in block.recorded if item["kind"] == "ssh"]
-    delete_index = next(i for i, d in enumerate(ssh_details) if "iptables -D" in d)
-    insert_index = next(i for i, d in enumerate(ssh_details) if "iptables -I" in d)
+    delete_index = next(i for i, d in enumerate(ssh_details) if "nft delete table" in d)
+    insert_index = next(i for i, d in enumerate(ssh_details) if "nft add table" in d)
     if not delete_index < insert_index:
         raise SystemExit(f"{STEP}: telemetry unblock must be scheduled first: {ssh_details}")
-    if "--dport 4318" not in ssh_details[insert_index]:
-        raise SystemExit(f"{STEP}: telemetry block must target port 4318: {ssh_details}")
+    if f"dport {COLLECTOR_PORT}" not in ssh_details[insert_index]:
+        raise SystemExit(f"{STEP}: telemetry block must target port {COLLECTOR_PORT}: {ssh_details}")
 
     alter = record("alter-telemetry")
     otlp_actions = [item for item in alter.recorded if item["kind"] == "otlp"]

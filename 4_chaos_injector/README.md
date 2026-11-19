@@ -11,7 +11,7 @@ concurrently.
 | `stop-network` | `nmcli networking off` for 60s; recovery is scheduled with a systemd timer **before** the outage | `metrics-silent` while the host is unreachable |
 | `restart-vm` | deletes the VMI; the VM controller recreates it (reboot) | `metrics-silent` during the reboot, fresh fault after |
 | `shutdown-vm` | sets `spec.running=false` (stays down) | `metrics-silent` (persistent) |
-| `block-telemetry` | `iptables REJECT` on VM egress to port 4318 for 30s | `metrics-silent` while the service keeps running |
+| `block-telemetry` | nftables reject rule on VM egress to port 4318 for 30s | `metrics-silent` while the service keeps running |
 | `alter-telemetry` | blocks the real telemetry and publishes fake OTLP metrics (impossible zeros or a CPU spike) for 60s | `zero-telemetry` or `cpu-saturation` |
 
 ## Prerequisites
@@ -48,7 +48,9 @@ scenario per VM instead of per round. Timings: `--network-seconds` (60),
 
 - `stop-network` and `block-telemetry` are self-healing: the restore command
   is queued with `systemd-run --on-active=N` **before** the outage, because
-  nothing can reach the VM once it is cut off.
+  nothing can reach the VM once it is cut off. The telemetry block is a
+  dedicated nftables table (`inet chaos`) that the recovery timer deletes
+  whole — RHEL 10 has no `iptables` binary.
 - With the default in-pod **mock** Ansible MCP server, remediation of
   persistent scenarios (`kill-service`, `shutdown-vm`) is fictional: the
   workflow retries three times and then reports `failed` honestly. Point
