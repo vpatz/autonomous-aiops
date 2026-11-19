@@ -18,6 +18,10 @@ Verification is built into the scripts — run from the repo root:
 python3 3_langgraph_workflow/workflow.py --self-check
 python3 3_langgraph_workflow/workflow.py --demo          # narrative run, no cluster/LLM/MCP
 
+# stage 4 (chaos injector)
+python3 4_chaos_injector/chaos_injector.py --self-check
+python3 4_chaos_injector/chaos_injector.py --dry-run     # plan only, no cluster actions
+
 # stage 3 single modules (workflow --self-check runs all of these)
 python3 3_langgraph_workflow/{state,llm,mock_mcp_server,mcp_client,collector,anomaly_detector,root_cause_analyzer,remediation_selector,graph}.py --self-check
 
@@ -69,6 +73,15 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   default = collector + poller + dashboard on :4318). `graph.build_graph()` wires the
   agents; nodes route with LangGraph `Command(goto=...)`, and `investigation`/`findings`
   are append-only state channels (the audit trail the dashboard shows).
+- Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the seven demo scenarios
+  (kill/restart service, stop network 60s, restart/shutdown VM, block telemetry 30s,
+  fake telemetry). In-VM commands run over `oc virt ssh` (requires the oc-virt plugin
+  and the linux-mcp key at `~/.ssh/mcp_id_ed25519`); VM ops use `oc delete vmi` /
+  `oc patch vm`; fake telemetry is OTLP-posted to the collector route. Timed scenarios
+  schedule their own recovery with `systemd-run --on-active=N` before the outage —
+  keep that ordering if you touch them. `alter-telemetry` zeros are only detectable
+  because the stage-3 detector has the `zero-telemetry` signal — redeploy the workflow
+  pod when the detector changes.
 - MCP servers are resolved from `LINUX_MCP_URL`/`LINUX_MCP_COMMAND` and
   `ANSIBLE_MCP_URL`/`ANSIBLE_MCP_COMMAND`. In-cluster default for linux-mcp:
   `http://linux-mcp.my-vm-project.svc.cluster.local:8000/mcp` (deployed by

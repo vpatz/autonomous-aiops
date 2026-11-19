@@ -58,7 +58,10 @@ approved remediation plan, its execution, and the verification pass.
 
 See [3_langgraph_workflow/README.md](3_langgraph_workflow/README.md) for
 local end-to-end runs with real telemetry, configuration (LLM, MCP
-servers), and the deployed mode.
+servers), and the deployed mode, and
+[4_chaos_injector/README.md](4_chaos_injector/README.md) for injecting
+failure scenarios (kill service, stop network, restart/shutdown VM, block or
+corrupt telemetry) into the VMs.
 
 ## Infra setup (OpenShift Virtualization)
 
@@ -92,3 +95,4 @@ servers), and the deployed mode.
 | `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
 | `2_aiops_agent/` | earlier single-loop demo: silence detection -> EDA restart event |
 | `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
+| `4_chaos_injector/` | chaos scenarios injected into the VMs to exercise the workflow |

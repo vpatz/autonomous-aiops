@@ -81,6 +81,13 @@ def analyze_window(window, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
     if memory is not None and memory > MEMORY_THRESHOLD_PERCENT:
         signals.append("memory-pressure")
         reasons.append(f"service.memory.load at {memory:.1f}%")
+    uptime = metrics.get("service.uptime")
+    if (cpu == 0.0 and memory == 0.0
+            and isinstance(uptime, (int, float)) and uptime > 60):
+        # A running host cannot report exactly zero CPU and zero memory load
+        # past startup; the chaos injector's fake-telemetry scenario does.
+        signals.append("zero-telemetry")
+        reasons.append("telemetry reports impossible zero CPU and memory load")
 
     detected = bool(signals)
     score = len(signals) + (1 if "metrics-silent" in signals else 0)
@@ -233,6 +240,30 @@ def self_check():
     anomaly = analyze_window(saturated)
     if "cpu-saturation" not in anomaly["signals"] or "memory-pressure" not in anomaly["signals"]:
         raise SystemExit(f"{STEP}: saturation window not flagged {anomaly}")
+
+    # Fake telemetry: impossible zeros past startup must be flagged, but a
+    # service that just booted (small uptime) may legitimately report zeros.
+    corrupted = {
+        "ever_seen": True,
+        "last_seen_seconds_ago": 1.0,
+        "metrics": {"service.uptime": 999.0, "service.cpu.load": 0.0,
+                    "service.memory.load": 0.0},
+        "logs": [],
+        "traces": [],
+    }
+    anomaly = analyze_window(corrupted)
+    if "zero-telemetry" not in anomaly["signals"]:
+        raise SystemExit(f"{STEP}: zero-telemetry window not flagged {anomaly}")
+    booting = {
+        "ever_seen": True,
+        "last_seen_seconds_ago": 1.0,
+        "metrics": {"service.uptime": 5.0, "service.cpu.load": 0.0,
+                    "service.memory.load": 0.0},
+        "logs": [],
+        "traces": [],
+    }
+    if analyze_window(booting)["detected"]:
+        raise SystemExit(f"{STEP}: boot-time zeros must not be flagged")
 
     # Node-level check: routing on a healthy window ends the workflow.
     from langgraph.types import Command

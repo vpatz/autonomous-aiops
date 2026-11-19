@@ -1,0 +1,3 @@
+# Stage 4: chaos injector. The oc/oc-virt channel is subprocess-based;
+# only the fake-telemetry payload needs a package.
+opentelemetry-proto==1.41.1
