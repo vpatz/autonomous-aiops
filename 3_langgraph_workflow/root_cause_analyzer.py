@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Agent 2: root cause analyzer (the inner loop).
+
+Iterates to dig deeper into the anomaly using tools from MCP servers. Each
+iteration either calls one MCP tool (typically the linux-mcp server that can
+run commands and read files on the affected VM) or concludes with a root
+cause. The loop repeats until a root cause is found, the iteration budget is
+spent, or the tools stop adding information.
+
+With a configured LLM the next tool call is chosen by the model from the
+live MCP tools/list result; without one a deterministic playbook runs the
+same shape of investigation. Either way every iteration is recorded in the
+append-only `investigation` channel.
+
+Verify:
+
+    python3 3_langgraph_workflow/root_cause_analyzer.py --self-check
+"""
+
+import argparse
+import json
+
+import llm
+import mcp_client
+import state
+
+STEP = "agent 2 root cause analyzer"
+SERVICE_UNIT = "aiops-demo.service"
+EXEC_TOOL_CANDIDATES = ("run_command", "execute_command", "exec", "shell", "command")
+FALLBACK_COMMANDS = (
+    f"systemctl status {SERVICE_UNIT}",
+    f"journalctl -u {SERVICE_UNIT} -n 50 --no-pager",
+)
+MAX_OUTPUT_CHARS = 400
+
+
+def truncate(text, limit=MAX_OUTPUT_CHARS):
+    text = (text or "").strip().replace("\n", " | ")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def pick_exec_tool(tools, preferred=None):
+    """Choose the command-execution tool from an MCP tools/list result."""
+    names = [tool.get("name", "") for tool in tools]
+    for candidate in ([preferred] if preferred else []) + list(EXEC_TOOL_CANDIDATES):
+        if candidate in names:
+            return candidate
+    for name in names:
+        lowered = name.lower()
+        if "command" in lowered or "exec" in lowered or "shell" in lowered:
+            return name
+    return names[0] if names else None
+
+
+def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
+    """Ask the LLM for the next investigation action as a JSON decision."""
+    tool_catalog = [
+        {"name": tool.get("name"), "description": tool.get("description", ""),
+         "inputSchema": tool.get("inputSchema", {})}
+        for tool in tools
+    ]
+    history = [
+        {"iteration": item["iteration"], "tool": item["tool"],
+         "arguments": item["arguments"], "output": item["output"][:200]}
+        for item in investigation
+    ]
+    prompt = (
+        "You are a root cause analysis agent in an autonomous ITOps workflow. "
+        "Find the root cause of an anomaly on one service by calling MCP tools "
+        "one at a time (inner loop). Choose exactly one action.\n\n"
+        "Reply with ONLY a JSON object, either:\n"
+        '{"action": "call_tool", "tool": "<name>", "arguments": {...}}\n'
+        "or, once you know the root cause:\n"
+        '{"action": "conclude", "root_cause": {"component": "...", "summary": "...", '
+        '"confidence": "high|medium|low"}}\n\n'
+        f"Iteration: {iteration}/{max_iterations}\n"
+        f"Service anomaly: {json.dumps(anomaly)[:600]}\n"
+        f"MCP tools available: {json.dumps(tool_catalog)[:1500]}\n"
+        f"Investigation so far: {json.dumps(history)[:2000] or 'none yet'}\n"
+    )
+    return llm.chat_json([{"role": "user", "content": prompt}])
+
+
+def _fallback_next_action(investigation, tools, iteration):
+    """Deterministic playbook when no LLM is configured."""
+    exec_tool = pick_exec_tool(tools)
+    if exec_tool and iteration <= len(FALLBACK_COMMANDS):
+        command = FALLBACK_COMMANDS[iteration - 1]
+        return {"action": "call_tool", "tool": exec_tool, "arguments": {"command": command}}
+    return {"action": "conclude", "root_cause": _conclude(investigation)}
+
+
+def _conclude(investigation):
+    """Derive a root cause from the investigation outputs."""
+    evidence = [item for item in investigation if item.get("status") == "ok"]
+    text = " ".join(item.get("output", "") for item in evidence).lower()
+    if "dummy crash" in text or "dummy-crash" in text:
+        summary = (
+            f"The application reported a dummy-crash fault (ERROR log, failed span, "
+            f"dummy-crash metric). The process is still running but is in an error "
+            f"state that persists until {SERVICE_UNIT} is restarted."
+        )
+        component = SERVICE_UNIT
+        confidence = "high"
+    elif "active: failed" in text or "inactive" in text or "result: exit-code" in text:
+        summary = (
+            f"The {SERVICE_UNIT} systemd unit is not running (exit-code failure). "
+            f"The unit has Restart=no, so nothing restarts it automatically."
+        )
+        component = SERVICE_UNIT
+        confidence = "high"
+    elif "cpu" in text and "load average" in text:
+        summary = "Host resource saturation is degrading the service."
+        component = "host"
+        confidence = "medium"
+    else:
+        summary = "Unhealthy state observed; no single component isolated from the collected evidence."
+        component = "unknown"
+        confidence = "low"
+    return {
+        "found": True,
+        "component": component,
+        "summary": summary,
+        "evidence": [truncate(item.get("output", ""), 200) for item in evidence],
+        "confidence": confidence,
+    }
+
+
+def build_node(linux_mcp=None, use_llm=True):
+    """Return the LangGraph node for the root cause analyzer (inner loop)."""
+
+    def rca_node(workflow_state):
+        from langgraph.types import Command
+
+        iteration = workflow_state.get("iteration", 0) + 1
+        max_iterations = workflow_state.get("max_iterations", state.DEFAULT_MAX_ITERATIONS)
+        service_name = workflow_state["service_name"]
+        anomaly = workflow_state.get("anomaly", {})
+        investigation = list(workflow_state.get("investigation", []))
+
+        tools = []
+        if linux_mcp is not None:
+            try:
+                tools = linux_mcp.list_tools()
+            except mcp_client.McpError as exc:
+                investigation.append(
+                    {"iteration": iteration, "tool": "tools/list", "arguments": {},
+                     "output": truncate(str(exc)), "status": "error"}
+                )
+
+        decision = None
+        if use_llm and llm.available() and tools:
+            try:
+                decision = _llm_next_action(anomaly, investigation, tools, iteration, max_iterations)
+            except Exception:  # noqa: BLE001 - LLM is best effort
+                decision = None
+        if decision is None:
+            if linux_mcp is None:
+                # No MCP server configured: conclude from telemetry alone.
+                decision = {"action": "conclude", "root_cause": {
+                    "found": True,
+                    "component": SERVICE_UNIT,
+                    "summary": f"No linux MCP server configured; concluding from the anomaly "
+                               f"signals alone: {anomaly.get('summary', 'unknown error state')}.",
+                    "evidence": [],
+                    "confidence": "low",
+                }}
+            else:
+                decision = _fallback_next_action(investigation, tools, iteration)
+
+        if decision.get("action") == "call_tool" and iteration <= max_iterations:
+            tool = decision.get("tool") or ""
+            arguments = decision.get("arguments") or {}
+            if tool not in [item.get("name") for item in tools]:
+                # Unapproved or unknown tool: fall back to a known-good call.
+                fallback = _fallback_next_action(investigation, tools, iteration)
+                if fallback.get("action") == "call_tool":
+                    tool, arguments = fallback["tool"], fallback["arguments"]
+                else:
+                    decision = fallback
+            if decision.get("action") == "call_tool":
+                try:
+                    output = linux_mcp.call_tool(tool, arguments)
+                    status = "ok"
+                except (mcp_client.McpError, OSError) as exc:
+                    output, status = str(exc), "error"
+                entry = {
+                    "iteration": iteration,
+                    "tool": tool,
+                    "arguments": arguments,
+                    "output": truncate(output),
+                    "status": status,
+                }
+                finding = (
+                    f"[{STEP}] iteration {iteration}/{max_iterations}: "
+                    f"{tool} {json.dumps(arguments)} -> {truncate(output, 160)}"
+                )
+                return Command(
+                    goto=state.NODE_RCA,
+                    update={
+                        "iteration": iteration,
+                        "investigation": [entry],
+                        "findings": [finding],
+                    },
+                )
+
+        # Conclude (or the iteration budget is spent).
+        root_cause = decision.get("root_cause") or _conclude(investigation)
+        root_cause.setdefault("found", True)
+        if iteration > max_iterations:
+            root_cause["found"] = bool(root_cause.get("confidence") != "low")
+            root_cause["summary"] = (
+                f"Iteration budget spent ({max_iterations}). Best hypothesis: "
+                + root_cause.get("summary", "")
+            )
+        finding = (
+            f"[{STEP}] root cause found (confidence={root_cause.get('confidence', 'n/a')}): "
+            f"{root_cause.get('summary', '')} [component={root_cause.get('component', '?')}]"
+        )
+        return Command(
+            goto=state.NODE_SELECTOR,
+            update={
+                "iteration": iteration,
+                "root_cause": root_cause,
+                "findings": [finding],
+            },
+        )
+
+    return rca_node
+
+
+def self_check():
+    calls = []
+
+    def handler(name, arguments):
+        calls.append((name, arguments))
+        if arguments.get("command", "").startswith("systemctl"):
+            return "Active: active (running) since Tue 2026-11-17; Main PID: 2841"
+        if arguments.get("command", "").startswith("journalctl"):
+            return "python3[2841]: service app sent dummy-crash event\npython3[2841]: ERROR: service app simulated a dummy crash"
+        return "[mock] ok"
+
+    tools = [
+        {"name": "run_command", "description": "Run a shell command",
+         "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}}},
+    ]
+    linux = mcp_client.FakeMcpClient(tools, handler)
+    node = build_node(linux_mcp=linux, use_llm=False)
+
+    workflow_state = state.initial_state("vm-1")
+    workflow_state["anomaly"] = {"detected": True, "signals": ["error-logs"], "summary": "error logs"}
+    from langgraph.types import Command
+
+    iterations = 0
+    while True:
+        result = node(workflow_state)
+        iterations += 1
+        if not isinstance(result, Command):
+            raise SystemExit(f"{STEP}: node must return a Command, got {result}")
+        # Apply the update the way LangGraph would (append-only channels).
+        for key, value in (result.update or {}).items():
+            if key in ("investigation", "findings"):
+                workflow_state[key] = workflow_state.get(key, []) + value
+            else:
+                workflow_state[key] = value
+        if result.goto == state.NODE_SELECTOR:
+            break
+        if result.goto != state.NODE_RCA:
+            raise SystemExit(f"{STEP}: unexpected goto {result.goto}")
+        if iterations > 6:
+            raise SystemExit(f"{STEP}: inner loop did not terminate")
+    if iterations < 2:
+        raise SystemExit(f"{STEP}: expected at least one dig-deeper iteration, got {iterations}")
+    root_cause = workflow_state["root_cause"]
+    if not root_cause["found"] or root_cause["component"] != SERVICE_UNIT:
+        raise SystemExit(f"{STEP}: bad root cause {root_cause}")
+    if root_cause["confidence"] != "high" or "dummy-crash" not in root_cause["summary"]:
+        raise SystemExit(f"{STEP}: crash evidence not concluded {root_cause}")
+    if len(calls) < 2:
+        raise SystemExit(f"{STEP}: expected 2 tool calls, got {len(calls)}")
+
+    # No MCP configured: must still conclude and route onward.
+    node = build_node(linux_mcp=None, use_llm=False)
+    result = node(state.initial_state("vm-1"))
+    if result.goto != state.NODE_SELECTOR or not result.update["root_cause"]["found"]:
+        raise SystemExit(f"{STEP}: no-MCP fallback should conclude, got {result}")
+
+    # Iteration budget: one tool call, then the loop must conclude.
+    budget_calls = []
+
+    def budget_handler(name, arguments):
+        budget_calls.append((name, arguments))
+        return "Active: active (running) since Tue 2026-11-17"
+
+    budget_linux = mcp_client.FakeMcpClient(tools, budget_handler)
+    node = build_node(linux_mcp=budget_linux, use_llm=False)
+    workflow_state = state.initial_state("vm-1", max_iterations=1)
+    workflow_state["anomaly"] = {"detected": True, "signals": [], "summary": "unknown"}
+    passes = 0
+    while True:
+        result = node(workflow_state)
+        passes += 1
+        for key, value in (result.update or {}).items():
+            if key in ("investigation", "findings"):
+                workflow_state[key] = workflow_state.get(key, []) + value
+            else:
+                workflow_state[key] = value
+        if result.goto == state.NODE_SELECTOR:
+            break
+        if result.goto != state.NODE_RCA or passes > 4:
+            raise SystemExit(f"{STEP}: budget run should conclude, got {result.goto} at pass {passes}")
+    if len(budget_calls) != 1:
+        raise SystemExit(f"{STEP}: budget of 1 should allow exactly one tool call, got {len(budget_calls)}")
+    print(f"{STEP}: self-check ok", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Agent 2: root cause analyzer")
+    parser.add_argument("--self-check", action="store_true")
+    args = parser.parse_args()
+    if not args.self_check:
+        raise SystemExit("pass --self-check; the workflow runs this agent as a graph node")
+    self_check()
+
+
+if __name__ == "__main__":
+    main()

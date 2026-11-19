@@ -1,0 +1,3170 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiops-workflow
+  namespace: my-vm-project
+data:
+  state.py: |
+    #!/usr/bin/env python3
+    """Shared state and node names for the LangGraph multi-agent workflow.
+
+    The workflow is a LangGraph StateGraph over WorkflowState:
+
+        START -> anomaly_detector -> root_cause_analyzer (inner loop, iterates
+                 through MCP tools) -> remediation_selector -> remediation_executor
+                 -> anomaly_detector (outer loop, verifies the remediation) -> END
+
+    `investigation` and `findings` are append-only lists (operator.add reducers):
+    every root-cause iteration and every agent decision is kept as an audit trail
+    for the dashboard and the demo narrative.
+
+    Verify:
+
+        python3 3_langgraph_workflow/state.py --self-check
+    """
+
+    import operator
+    from typing import Annotated, TypedDict
+
+    STEP = "workflow state"
+
+    # LangGraph node names.
+    NODE_DETECTOR = "anomaly_detector"
+    NODE_RCA = "root_cause_analyzer"
+    NODE_SELECTOR = "remediation_selector"
+    NODE_EXECUTOR = "remediation_executor"
+
+    # Workflow statuses.
+    STATUS_HEALTHY = "healthy"
+    STATUS_INVESTIGATING = "investigating"
+    STATUS_REMEDIATING = "remediating"
+    STATUS_REMEDIATED = "remediated"
+    STATUS_FAILED = "failed"
+
+    DEFAULT_WINDOW_SECONDS = 120
+    DEFAULT_SILENCE_SECONDS = 10
+    DEFAULT_MAX_ITERATIONS = 5
+    DEFAULT_MAX_ATTEMPTS = 3
+    DEFAULT_POLL_SECONDS = 5
+    DEFAULT_COOLDOWN_SECONDS = 120
+    DEFAULT_VERIFY_WAIT_SECONDS = 30
+
+
+    class WorkflowState(TypedDict, total=False):
+        """State shared by every agent node in the graph."""
+
+        service_name: str
+        window_seconds: int
+        telemetry: dict
+        anomaly: dict
+        investigation: Annotated[list, operator.add]
+        root_cause: dict
+        remediation: dict
+        remediation_result: dict
+        findings: Annotated[list, operator.add]
+        attempts: int
+        max_attempts: int
+        iteration: int
+        max_iterations: int
+        verify_since: float
+        status: str
+
+
+    def initial_state(
+        service_name,
+        window_seconds=DEFAULT_WINDOW_SECONDS,
+        telemetry=None,
+        max_iterations=DEFAULT_MAX_ITERATIONS,
+        max_attempts=DEFAULT_MAX_ATTEMPTS,
+    ):
+        return {
+            "service_name": service_name,
+            "window_seconds": window_seconds,
+            "telemetry": telemetry or {},
+            "anomaly": {},
+            "investigation": [],
+            "root_cause": {},
+            "remediation": {},
+            "remediation_result": {},
+            "findings": [],
+            "attempts": 0,
+            "max_attempts": max_attempts,
+            "iteration": 0,
+            "max_iterations": max_iterations,
+            "verify_since": 0.0,
+            "status": STATUS_INVESTIGATING,
+        }
+
+
+    def self_check():
+        state = initial_state("vm-1")
+        expected = {
+            "service_name": "vm-1",
+            "window_seconds": DEFAULT_WINDOW_SECONDS,
+            "attempts": 0,
+            "iteration": 0,
+            "status": STATUS_INVESTIGATING,
+        }
+        for key, value in expected.items():
+            if state.get(key) != value:
+                raise SystemExit(f"{STEP}: expected {key}={value}, got {state.get(key)}")
+        # The append-only channels must reduce with operator.add so that each
+        # inner-loop iteration adds to the audit trail instead of replacing it.
+        if state["investigation"] + [{"tool": "x"}] != [{"tool": "x"}]:
+            raise SystemExit(f"{STEP}: investigation must be a list")
+        if not hasattr(operator, "add"):
+            raise SystemExit(f"{STEP}: operator.add missing")
+        for node in (NODE_DETECTOR, NODE_RCA, NODE_SELECTOR, NODE_EXECUTOR):
+            if not isinstance(node, str) or not node:
+                raise SystemExit(f"{STEP}: bad node name {node}")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def main():
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Shared workflow state")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if not args.self_check:
+            raise SystemExit("pass --self-check; the workflow imports this module")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  llm.py: |
+    #!/usr/bin/env python3
+    """OpenAI-compatible chat client for the workflow agents.
+
+    Works with any /v1/chat/completions endpoint: vLLM on a GPU node, EnMaaS,
+    OpenAI, and so on. Configure with:
+
+        LLM_BASE_URL   e.g. https://enmaas.example.com/v1 (include /v1)
+        LLM_API_KEY    bearer token (optional for local vLLM)
+        LLM_MODEL      model name served at the endpoint
+
+    Every agent falls back to deterministic heuristics when the LLM is not
+    configured or a call fails, so the demo always runs.
+
+    Verify (no network needed):
+
+        python3 3_langgraph_workflow/llm.py --self-check
+
+    Probe a live endpoint:
+
+        python3 3_langgraph_workflow/llm.py --probe
+    """
+
+    import argparse
+    import json
+    import os
+    import re
+    import urllib.error
+    import urllib.request
+
+    STEP = "llm client"
+
+
+    class LlmError(Exception):
+        pass
+
+
+    def config():
+        return {
+            "base_url": os.environ.get("LLM_BASE_URL", "").strip().rstrip("/"),
+            "api_key": os.environ.get("LLM_API_KEY", "").strip(),
+            "model": os.environ.get("LLM_MODEL", "").strip(),
+        }
+
+
+    def available():
+        cfg = config()
+        return bool(cfg["base_url"] and cfg["model"])
+
+
+    def build_request(messages, tools=None, temperature=0.0, max_tokens=1024):
+        cfg = config()
+        payload = {
+            "model": cfg["model"],
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+        headers = {"Content-Type": "application/json"}
+        if cfg["api_key"]:
+            headers["Authorization"] = f"Bearer {cfg['api_key']}"
+        url = cfg["base_url"] + "/chat/completions"
+        return urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=headers, method="POST"
+        )
+
+
+    def chat(messages, tools=None, temperature=0.0, max_tokens=1024):
+        """One chat completion. Returns {"content": str, "tool_calls": list}."""
+        if not available():
+            raise LlmError("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+        request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                body = json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            raise LlmError(f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}") from exc
+        except OSError as exc:
+            raise LlmError(f"request failed: {exc}") from exc
+        try:
+            choice = body["choices"][0]["message"]
+        except (KeyError, IndexError) as exc:
+            raise LlmError(f"unexpected response shape: {json.dumps(body)[:200]}") from exc
+        return {
+            "content": choice.get("content") or "",
+            "tool_calls": choice.get("tool_calls") or [],
+        }
+
+
+    def _extract_json(text):
+        """Parse a JSON object out of an LLM reply, tolerating code fences."""
+        if not text:
+            raise LlmError("empty LLM reply")
+        stripped = text.strip()
+        fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL)
+        if fence:
+            stripped = fence.group(1).strip()
+        try:
+            return json.loads(stripped)
+        except ValueError:
+            pass
+        start, end = stripped.find("{"), stripped.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(stripped[start : end + 1])
+            except ValueError:
+                pass
+        raise LlmError(f"no JSON object in reply: {text[:200]}")
+
+
+    def chat_json(messages, temperature=0.0, max_tokens=1024):
+        """Chat completion parsed as a JSON object (agents use JSON decisions)."""
+        reply = chat(messages, temperature=temperature, max_tokens=max_tokens)
+        return _extract_json(reply["content"])
+
+
+    def self_check():
+        import os
+
+        saved = {key: os.environ.get(key) for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")}
+        os.environ["LLM_BASE_URL"] = "https://llm.example.com/v1"
+        os.environ["LLM_MODEL"] = "test-model"
+        os.environ.pop("LLM_API_KEY", None)
+        try:
+            parsed = _extract_json('Sure! ```json\n{"detected": true, "score": 2}\n```')
+            if parsed != {"detected": True, "score": 2}:
+                raise SystemExit(f"{STEP}: fenced JSON not parsed: {parsed}")
+            parsed = _extract_json('The answer is {"a": 1} hope that helps')
+            if parsed != {"a": 1}:
+                raise SystemExit(f"{STEP}: embedded JSON not parsed: {parsed}")
+            try:
+                _extract_json("no json here")
+                raise SystemExit(f"{STEP}: garbage should not parse")
+            except LlmError:
+                pass
+            request = build_request(
+                [{"role": "user", "content": "hi"}],
+            )
+            if request.full_url != "https://llm.example.com/v1/chat/completions":
+                raise SystemExit(f"{STEP}: bad request url {request.full_url}")
+            data = json.loads(request.data.decode())
+            if data["messages"][0]["content"] != "hi" or data["temperature"] != 0.0:
+                raise SystemExit(f"{STEP}: bad request payload {data}")
+            if data["model"] != "test-model":
+                raise SystemExit(f"{STEP}: bad model in payload {data}")
+            if "Authorization" in request.headers:
+                raise SystemExit(f"{STEP}: auth header without api key")
+            os.environ["LLM_API_KEY"] = "secret"
+            request = build_request([{"role": "user", "content": "hi"}])
+            if request.headers.get("Authorization") != "Bearer secret":
+                raise SystemExit(f"{STEP}: bearer token not set")
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        print(f"{STEP}: self-check ok (configured={available()})", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="OpenAI-compatible LLM client")
+        parser.add_argument("--self-check", action="store_true")
+        parser.add_argument("--probe", action="store_true", help="send one live chat request")
+        args = parser.parse_args()
+        if args.probe:
+            if not available():
+                raise SystemExit("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+            reply = chat([{"role": "user", "content": "Reply with the single word: ok"}])
+            print(f"model replied: {reply['content'][:200]}", flush=True)
+            return
+        if not args.self_check:
+            raise SystemExit("pass --self-check or --probe")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  mcp_client.py: |
+    #!/usr/bin/env python3
+    """Minimal MCP client for the multi-agent workflow.
+
+    Supports the three transports the demo needs:
+
+    - stdio  (StdioMcpClient):  spawn a local MCP server command, e.g. the mock
+      server or a locally installed Ansible MCP server
+    - streamable HTTP (HttpMcpClient): talk to a remote MCP endpoint such as the
+      linux-mcp server running in the cluster
+    - in-process fake (FakeMcpClient): self-checks and the offline demo
+
+    Configuration comes from the environment:
+
+        LINUX_MCP_URL / LINUX_MCP_COMMAND         linux (RCA) MCP server
+        ANSIBLE_MCP_URL / ANSIBLE_MCP_COMMAND     Ansible (remediation) MCP server
+        MCP_INSECURE_TLS=1                        skip TLS verification (lab routes)
+
+    Verify:
+
+        python3 3_langgraph_workflow/mcp_client.py --self-check
+    """
+
+    import argparse
+    import json
+    import os
+    import shlex
+    import subprocess
+    import urllib.request
+
+    PROTOCOL_VERSION = "2024-11-05"
+
+
+    class McpError(Exception):
+        pass
+
+
+    def tool_text(result):
+        """Extract the text of an MCP tools/call result; raise on isError."""
+        parts = []
+        for item in (result or {}).get("content", []):
+            if item.get("type") == "text":
+                parts.append(item.get("text", ""))
+        text = "\n".join(parts).strip()
+        if (result or {}).get("isError"):
+            raise McpError(text or "MCP tool call failed")
+        return text
+
+
+    class BaseMcpClient:
+        def __init__(self):
+            self._id = 0
+            self.server_info = {}
+
+        def _next_id(self):
+            self._id += 1
+            return self._id
+
+        def _initialize(self):
+            result = self._request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "aiops-workflow", "version": "1.0.0"},
+                },
+            )
+            self.server_info = (result or {}).get("serverInfo", {})
+            self._notify("notifications/initialized")
+
+        def list_tools(self):
+            return (self._request("tools/list", {}) or {}).get("tools", [])
+
+        def call_tool(self, name, arguments=None):
+            result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+            return tool_text(result)
+
+        def _request(self, method, params):
+            raise NotImplementedError
+
+        def _notify(self, method):
+            raise NotImplementedError
+
+        def close(self):
+            return None
+
+
+    class FakeMcpClient(BaseMcpClient):
+        """In-process client wired straight to a handler (self-checks, --demo)."""
+
+        def __init__(self, tools, handler):
+            super().__init__()
+            self._tools = tools
+            self._handler = handler
+            self._initialize()
+
+        def _request(self, method, params):
+            if method == "initialize":
+                return {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "fake-mcp", "version": "1.0.0"},
+                }
+            if method == "tools/list":
+                return {"tools": self._tools}
+            if method == "tools/call":
+                try:
+                    return {
+                        "content": [{"type": "text", "text": self._handler(params.get("name"), params.get("arguments") or {})}],
+                        "isError": False,
+                    }
+                except ValueError as exc:
+                    return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+            raise McpError(f"fake server: unsupported method {method}")
+
+        def _notify(self, method):
+            return None
+
+
+    class StdioMcpClient(BaseMcpClient):
+        """MCP over stdio: newline-delimited JSON-RPC 2.0 on a subprocess."""
+
+        def __init__(self, command):
+            super().__init__()
+            if isinstance(command, str):
+                command = shlex.split(command)
+            self._proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            self._initialize()
+
+        def _send(self, message):
+            try:
+                self._proc.stdin.write(json.dumps(message) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise McpError(f"stdio server closed: {exc}") from exc
+
+        def _request(self, method, params):
+            request_id = self._next_id()
+            message = {"jsonrpc": "2.0", "id": request_id, "method": method}
+            if params is not None:
+                message["params"] = params
+            self._send(message)
+            while True:
+                line = self._proc.stdout.readline()
+                if not line:
+                    raise McpError(f"stdio server closed while awaiting {method}")
+                try:
+                    response = json.loads(line)
+                except ValueError:
+                    continue
+                if response.get("id") != request_id:
+                    continue  # server-initiated message; ignore
+                if "error" in response:
+                    raise McpError(f"{method}: {response['error'].get('message')}")
+                return response.get("result")
+
+        def _notify(self, method):
+            self._send({"jsonrpc": "2.0", "method": method})
+
+        def close(self):
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+
+
+    class HttpMcpClient(BaseMcpClient):
+        """MCP over streamable HTTP (JSON responses, SSE tolerated)."""
+
+        def __init__(self, url, headers=None, timeout=30, insecure=False):
+            super().__init__()
+            self._url = url
+            self._headers = dict(headers or {})
+            self._timeout = timeout
+            if insecure:
+                import ssl
+
+                self._context = ssl._create_unverified_context()
+            else:
+                self._context = None
+            self._session = None
+            self._initialize()
+
+        def _post(self, message):
+            data = json.dumps(message).encode()
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                **self._headers,
+            }
+            if self._session:
+                headers["Mcp-Session-Id"] = self._session
+            request = urllib.request.Request(self._url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(request, timeout=self._timeout, context=self._context) as response:
+                if self._session is None:
+                    session = response.headers.get("Mcp-Session-Id")
+                    if session:
+                        self._session = session
+                body = response.read().decode("utf-8", "replace")
+                content_type = response.headers.get("Content-Type", "")
+            return body, content_type
+
+        def _request(self, method, params):
+            request_id = self._next_id()
+            message = {"jsonrpc": "2.0", "id": request_id, "method": method}
+            if params is not None:
+                message["params"] = params
+            try:
+                body, content_type = self._post(message)
+            except OSError as exc:
+                raise McpError(f"{method}: HTTP request failed: {exc}") from exc
+            response = self._parse(body, content_type, request_id)
+            if response is None:
+                raise McpError(f"{method}: no response from {self._url}")
+            if "error" in response:
+                raise McpError(f"{method}: {response['error'].get('message')}")
+            return response.get("result")
+
+        def _notify(self, method):
+            message = {"jsonrpc": "2.0", "method": method}
+            try:
+                self._post(message)
+            except OSError:
+                pass  # best effort for notifications
+
+        @staticmethod
+        def _parse(body, content_type, request_id):
+            if "text/event-stream" in content_type:
+                fallback = None
+                for line in body.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        message = json.loads(payload)
+                    except ValueError:
+                        continue
+                    if message.get("id") == request_id:
+                        return message
+                    if fallback is None and ("result" in message or "error" in message):
+                        fallback = message
+                return fallback
+            if not body.strip():
+                return None
+            try:
+                return json.loads(body)
+            except ValueError:
+                return None
+
+
+    def from_config(url=None, command=None, insecure=False):
+        """Build a client from a URL or a command string; None if neither is set."""
+        if url:
+            return HttpMcpClient(url, insecure=insecure)
+        if command:
+            return StdioMcpClient(command)
+        return None
+
+
+    def from_env(prefix, insecure=None):
+        """Build a client from {PREFIX}_MCP_URL / {PREFIX}_MCP_COMMAND env vars."""
+        if insecure is None:
+            insecure = os.environ.get("MCP_INSECURE_TLS", "").lower() in ("1", "true", "yes")
+        url = os.environ.get(f"{prefix}_MCP_URL", "").strip()
+        command = os.environ.get(f"{prefix}_MCP_COMMAND", "").strip()
+        return from_config(url=url or None, command=command or None, insecure=insecure)
+
+
+    def _mock_command(role):
+        return [
+            "python3",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_mcp_server.py"),
+            "--role",
+            role,
+        ]
+
+
+    def self_check():
+        import mock_mcp_server
+
+        fake = FakeMcpClient(mock_mcp_server.linux_tools(), mock_mcp_server.linux_call)
+        names = [tool["name"] for tool in fake.list_tools()]
+        if "run_command" not in names:
+            raise SystemExit(f"mcp client: fake tools/list missing run_command: {names}")
+        status = fake.call_tool("run_command", {"command": "systemctl status aiops-demo.service"})
+        if "active (running" not in status:
+            raise SystemExit("mcp client: fake tools/call returned unexpected status output")
+        try:
+            fake.call_tool("nope", {})
+            raise SystemExit("mcp client: unknown tool should raise")
+        except McpError:
+            pass
+        fake.close()
+
+        # Exercise the real stdio JSON-RPC framing against the mock server.
+        linux = StdioMcpClient(_mock_command("linux"))
+        names = [tool["name"] for tool in linux.list_tools()]
+        if "run_command" not in names:
+            raise SystemExit(f"mcp client: stdio tools/list missing run_command: {names}")
+        journal = linux.call_tool("run_command", {"command": "journalctl -u aiops-demo.service"})
+        if "dummy crash" not in journal:
+            raise SystemExit("mcp client: stdio tools/call journal looks wrong")
+        linux.close()
+
+        ansible = StdioMcpClient(_mock_command("ansible"))
+        modules = ansible.call_tool("list_approved_modules", {})
+        if "ansible.builtin.systemd" not in modules:
+            raise SystemExit("mcp client: stdio ansible approved modules missing systemd")
+        ansible.close()
+        print("mcp client: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Minimal MCP client")
+        parser.add_argument("--self-check", action="store_true")
+        parser.add_argument(
+            "--probe",
+            help="initialize against an MCP endpoint (URL or 'command string') and list tools",
+        )
+        args = parser.parse_args()
+        if args.probe:
+            if args.probe.startswith("http://") or args.probe.startswith("https://"):
+                client = from_config(url=args.probe)
+            else:
+                client = from_config(command=args.probe)
+            print(f"server: {client.server_info}", flush=True)
+            for tool in client.list_tools():
+                print(f"tool: {tool['name']}: {tool.get('description', '')}", flush=True)
+            client.close()
+            return
+        if not args.self_check:
+            raise SystemExit("pass --self-check or --probe '<url|command>'")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  mock_mcp_server.py: |
+    #!/usr/bin/env python3
+    """Mock MCP server for offline demos and self-checks.
+
+    Speaks MCP over stdio (newline-delimited JSON-RPC 2.0), the same protocol
+    the real linux-mcp and Ansible MCP servers use.
+
+    Roles:
+    - linux:   pretends to be a RHEL VM where the demo service just reported a
+               dummy-crash fault (process still running, error state set)
+    - ansible: pretends to be an Ansible MCP server with an approved-command
+               allowlist, and remembers when the service was restarted
+
+    Run:
+
+        python3 3_langgraph_workflow/mock_mcp_server.py --role linux
+        python3 3_langgraph_workflow/mock_mcp_server.py --role ansible
+
+    Verify:
+
+        python3 3_langgraph_workflow/mock_mcp_server.py --self-check
+    """
+
+    import argparse
+    import json
+    import sys
+
+    PROTOCOL_VERSION = "2024-11-05"
+    SERVICE_UNIT = "aiops-demo.service"
+
+    # Shared in-process state for the offline demo (--demo) and self-checks.
+    _ANSIBLE_STATE = {"restarted": False}
+
+    APPROVED_MODULES = [
+        "ansible.builtin.systemd",
+        "ansible.builtin.service_facts",
+        "ansible.builtin.command",
+        "ansible.builtin.setup",
+    ]
+
+
+    def linux_tools():
+        return [
+            {
+                "name": "run_command",
+                "description": "Run a shell command on the managed host and return its output",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "read_file",
+                "description": "Read a file from the managed host",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        ]
+
+
+    def ansible_tools():
+        return [
+            {
+                "name": "list_approved_modules",
+                "description": "List the approved (allowlisted) Ansible modules that can be run",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "run_module",
+                "description": "Run an approved Ansible module against a host",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host": {"type": "string"},
+                        "module": {"type": "string"},
+                        "arguments": {"type": "object"},
+                    },
+                    "required": ["host", "module"],
+                },
+            },
+        ]
+
+
+    def _systemctl_status():
+        state = "running" if _ANSIBLE_STATE["restarted"] else "running (fault reported)"
+        return (
+            f"\u25cf {SERVICE_UNIT} - AIOps demo service\n"
+            "     Loaded: loaded (/etc/systemd/system/aiops-demo.service; enabled; preset: enabled)\n"
+            f"     Active: active ({state}) since Tue 2026-11-17 10:09:04 UTC; 12min ago\n"
+            "   Main PID: 2841 (python3)\n"
+            "      Tasks: 4 (limit: 4915)\n"
+            "     Memory: 61.2M\n"
+            "        CPU: 4.216s\n"
+            "     CGroup: /system.slice/aiops-demo.service\n"
+            "             \u2514\u25002841 /opt/aiops/venv/bin/python /opt/aiops/src/1_vm_services/service.py\n"
+        )
+
+
+    def _journalctl():
+        return (
+            "-- Boot 6e5a2f9c... --\n"
+            "Nov 17 10:09:04 rhel10-service-1 systemd[1]: Started AIOps demo service.\n"
+            "Nov 17 10:09:07 rhel10-service-1 python3[2841]: service app will send dummy-crash in 187.4s\n"
+            "Nov 17 10:12:14 rhel10-service-1 python3[2841]: service app sent dummy-crash event\n"
+            "Nov 17 10:12:14 rhel10-service-1 python3[2841]: ERROR: service app simulated a dummy crash\n"
+            "Nov 17 10:12:15 rhel10-service-1 systemd[1]: aiops-demo.service: Deactivated successfully.\n"
+        )
+
+
+    def linux_call(name, arguments):
+        """Handle a linux-role tool call. Returns text; raises ValueError on bad input."""
+        if name == "run_command":
+            command = (arguments or {}).get("command", "")
+            if "systemctl status" in command and SERVICE_UNIT in command:
+                return _systemctl_status()
+            if command.strip().startswith("journalctl"):
+                return _journalctl()
+            if command.strip() == "hostname":
+                return "rhel10-service-1"
+            if command.strip() in ("uptime", "cat /proc/uptime"):
+                return " 10:24:01 up 1:15,  1 user,  load average: 0.31, 0.42, 0.35"
+            return f"[mock] command executed: {command}"
+        if name == "read_file":
+            path = (arguments or {}).get("path", "")
+            if path == "/var/log/aiops-setup.log":
+                return (
+                    "Installed:\n  git-2.43.0-1.el10.x86_64\n"
+                    "Successfully installed pip-25.2\n"
+                    "Successfully installed flask-3.0.3 opentelemetry-1.41.1\n"
+                    "Created symlink /etc/systemd/system/multi-user.target.wants/aiops-demo.service\n"
+                )
+            if path in ("/var/log/messages", "/var/log/secure"):
+                return (
+                    "Nov 17 10:12:14 rhel10-service-1 python3[2841]: service app sent dummy-crash event\n"
+                    "Nov 17 10:12:14 rhel10-service-1 python3[2841]: ERROR: service app simulated a dummy crash\n"
+                )
+            return f"[mock] file not found: {path}"
+        raise ValueError(f"unknown linux tool {name}")
+
+
+    def service_restarted():
+        """True once the mock ansible role has restarted the demo service."""
+        return _ANSIBLE_STATE["restarted"]
+
+
+    def reset():
+        """Reset the shared in-process mock state (hermetic demo runs)."""
+        _ANSIBLE_STATE["restarted"] = False
+
+
+    def ansible_call(name, arguments):
+        """Handle an ansible-role tool call. Returns text; raises ValueError on bad input."""
+        args = arguments or {}
+        if name == "list_approved_modules":
+            return "Approved Ansible modules: " + ", ".join(APPROVED_MODULES)
+        if name == "run_module":
+            module = args.get("module", "")
+            if module not in APPROVED_MODULES:
+                raise ValueError(f"module '{module}' is not in the approved list")
+            host = args.get("host", "unknown")
+            module_args = args.get("arguments", {})
+            if module == "ansible.builtin.systemd":
+                target_state = module_args.get("state", "unknown")
+                if target_state in ("restarted", "started"):
+                    _ANSIBLE_STATE["restarted"] = True
+                return json.dumps(
+                    {
+                        "changed": True,
+                        "host": host,
+                        "name": module_args.get("name", ""),
+                        "state": "running" if target_state in ("restarted", "started") else target_state,
+                    }
+                )
+            if module == "ansible.builtin.service_facts":
+                return json.dumps(
+                    {
+                        "changed": False,
+                        "host": host,
+                        "services": {SERVICE_UNIT: {"state": "running", "status": "running"}},
+                    }
+                )
+            return json.dumps({"changed": False, "host": host, "module": module, "ok": True})
+        raise ValueError(f"unknown ansible tool {name}")
+
+
+    def _tool_result(text):
+        return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+    def _tool_error(message):
+        return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
+    def serve(role):
+        tools = linux_tools() if role == "linux" else ansible_tools()
+        handler = linux_call if role == "linux" else ansible_call
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            method = message.get("method", "")
+            if method == "initialize":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "result": {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": f"mock-{role}-mcp", "version": "1.0.0"},
+                    },
+                }
+            elif method == "notifications/initialized":
+                continue
+            elif method == "tools/list":
+                response = {"jsonrpc": "2.0", "id": message.get("id"), "result": {"tools": tools}}
+            elif method == "tools/call":
+                params = message.get("params", {})
+                try:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "result": _tool_result(handler(params.get("name"), params.get("arguments") or {})),
+                    }
+                except ValueError as exc:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "result": _tool_error(str(exc)),
+                    }
+            elif method == "ping":
+                response = {"jsonrpc": "2.0", "id": message.get("id"), "result": {}}
+            elif message.get("id") is not None:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {"code": -32601, "message": f"method not found: {method}"},
+                }
+            else:
+                continue
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+
+    def self_check():
+        status = linux_call("run_command", {"command": f"systemctl status {SERVICE_UNIT}"})
+        if "active (running" not in status:
+            raise SystemExit(f"mock linux: status looks wrong: {status[:80]}")
+        journal = linux_call("run_command", {"command": "journalctl -u aiops-demo.service"})
+        if "dummy crash" not in journal:
+            raise SystemExit("mock linux: journal missing dummy crash")
+        if "dummy-crash" not in ansible_call("list_approved_modules", {}).replace("dummy-crash", ""):
+            pass  # approved modules text has no crash reference; sanity below
+        modules = ansible_call("list_approved_modules", {})
+        if "ansible.builtin.systemd" not in modules:
+            raise SystemExit("mock ansible: approved modules missing systemd")
+        result = json.loads(ansible_call("run_module", {"host": "vm-1", "module": "ansible.builtin.systemd", "arguments": {"name": SERVICE_UNIT, "state": "restarted"}}))
+        if not result.get("changed") or not service_restarted():
+            raise SystemExit("mock ansible: restart did not register")
+        try:
+            ansible_call("run_module", {"host": "vm-1", "module": "ansible.builtin.shell", "arguments": {}})
+            raise SystemExit("mock ansible: unapproved module should be rejected")
+        except ValueError:
+            pass
+        print("mock mcp server: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Mock MCP server over stdio")
+        parser.add_argument("--role", choices=["linux", "ansible"], default="linux")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if args.self_check:
+            self_check()
+            return
+        serve(args.role)
+
+
+    if __name__ == "__main__":
+        main()
+  collector.py: |
+    #!/usr/bin/env python3
+    """Telemetry collector: receive OTLP/HTTP metrics, logs, and traces.
+
+    The demo service in each VM pushes all three signals here. Every record is
+    kept with a monotonic receive timestamp so the workflow can query time
+    windows (and post-remediation windows) per service.
+
+    Endpoints on :4318:
+
+        POST /v1/metrics  POST /v1/logs  POST /v1/traces   (OTLP/HTTP protobuf)
+        GET  /            collector dashboard
+        GET  /windows     JSON windows: ?service=NAME&seconds=120&since=MONO
+
+    Verify without a cluster:
+
+        python3 3_langgraph_workflow/collector.py --self-check
+
+    Listen for live telemetry (prints everything it receives):
+
+        python3 3_langgraph_workflow/collector.py
+    """
+
+    import argparse
+    import gzip
+    import html
+    import json
+    import threading
+    import time
+    from collections import deque
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
+        ExportLogsServiceRequest,
+        ExportLogsServiceResponse,
+    )
+    from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+        ExportMetricsServiceRequest,
+        ExportMetricsServiceResponse,
+    )
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+        ExportTraceServiceRequest,
+        ExportTraceServiceResponse,
+    )
+
+    STEP = "telemetry collector"
+    LISTEN_HOST = "0.0.0.0"
+    LISTEN_PORT = 4318
+    ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR, 18..24 = ERROR2..FATAL
+    MAX_PER_SIGNAL = 200
+    # Metrics whose increases are recorded as fault events. OTel counters are
+    # cumulative, so "dummy-crash is present" is not a fault signal — the fault
+    # is the increment. A restart resets the counter and clears the fault.
+    EVENT_METRICS = ("dummy-crash",)
+
+
+    def _resource_name(resource):
+        for pair in resource.attributes:
+            if pair.key == "service.name":
+                kind = pair.value.WhichOneof("value")
+                return str(getattr(pair.value, kind)) if kind else "unknown"
+        return "unknown"
+
+
+    def _number(point):
+        kind = point.WhichOneof("value")
+        if kind == "as_int":
+            return point.as_int
+        if kind == "as_double":
+            return point.as_double
+        return None
+
+
+    def _maybe_gzip(payload, content_encoding):
+        if content_encoding == "gzip":
+            return gzip.decompress(payload)
+        return payload
+
+
+    def parse_metrics(payload, content_encoding=None, received_at=None):
+        """Parse an OTLP metrics export into [(service_name, {metric: value})]."""
+        request = ExportMetricsServiceRequest()
+        request.ParseFromString(_maybe_gzip(payload, content_encoding))
+        received_at = time.monotonic() if received_at is None else received_at
+        parsed = []
+        for resource_metrics in request.resource_metrics:
+            service_name = _resource_name(resource_metrics.resource)
+            metrics = {}
+            for scope_metrics in resource_metrics.scope_metrics:
+                for metric in scope_metrics.metrics:
+                    kind = metric.WhichOneof("data")
+                    body = getattr(metric, kind) if kind else None
+                    if body is None or kind not in ("gauge", "sum"):
+                        continue
+                    points = list(body.data_points)
+                    if not points:
+                        continue
+                    value = _number(points[-1])
+                    if value is not None:
+                        metrics[metric.name] = value
+            parsed.append((service_name, metrics, received_at))
+        return parsed
+
+
+    def parse_logs(payload, content_encoding=None, received_at=None):
+        """Parse an OTLP logs export into [(service_name, [log entry dicts])]."""
+        request = ExportLogsServiceRequest()
+        request.ParseFromString(_maybe_gzip(payload, content_encoding))
+        received_at = time.monotonic() if received_at is None else received_at
+        parsed = []
+        for resource_logs in request.resource_logs:
+            service_name = _resource_name(resource_logs.resource)
+            entries = []
+            for scope_logs in resource_logs.scope_logs:
+                for record in scope_logs.log_records:
+                    body_kind = record.body.WhichOneof("value")
+                    entries.append(
+                        {
+                            "severity_number": int(record.severity_number),
+                            "severity_text": record.severity_text,
+                            "body": str(getattr(record.body, body_kind)) if body_kind else "",
+                            "at": received_at,
+                        }
+                    )
+            parsed.append((service_name, entries, received_at))
+        return parsed
+
+
+    def parse_traces(payload, content_encoding=None, received_at=None):
+        """Parse an OTLP traces export into [(service_name, [span dicts])]."""
+        request = ExportTraceServiceRequest()
+        request.ParseFromString(_maybe_gzip(payload, content_encoding))
+        received_at = time.monotonic() if received_at is None else received_at
+        parsed = []
+        for resource_spans in request.resource_spans:
+            service_name = _resource_name(resource_spans.resource)
+            spans = []
+            for scope_spans in resource_spans.scope_spans:
+                for span in scope_spans.spans:
+                    duration_ms = 0.0
+                    if span.end_time_unix_nano and span.start_time_unix_nano:
+                        duration_ms = (span.end_time_unix_nano - span.start_time_unix_nano) / 1e6
+                    spans.append(
+                        {
+                            "name": span.name,
+                            "status_code": int(span.status.code),
+                            "status_message": span.status.message,
+                            "duration_ms": round(duration_ms, 3),
+                            "at": received_at,
+                        }
+                    )
+            parsed.append((service_name, spans, received_at))
+        return parsed
+
+
+    class TelemetryStore:
+        """Per-service rolling telemetry buffers with time-window queries."""
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._services = {}
+
+        def _entry(self, service_name):
+            if service_name not in self._services:
+                self._services[service_name] = {
+                    "first_seen": time.monotonic(),
+                    "last_seen": time.monotonic(),
+                    "metrics": {},  # name -> {"value": float, "at": monotonic}
+                    "metric_events": deque(maxlen=MAX_PER_SIGNAL),
+                    "logs": deque(maxlen=MAX_PER_SIGNAL),
+                    "traces": deque(maxlen=MAX_PER_SIGNAL),
+                }
+            return self._services[service_name]
+
+        def record_metrics(self, parsed):
+            with self._lock:
+                for service_name, metrics, received_at in parsed:
+                    entry = self._entry(service_name)
+                    entry["last_seen"] = max(entry["last_seen"], received_at)
+                    for name, value in metrics.items():
+                        previous = entry["metrics"].get(name, {}).get("value")
+                        entry["metrics"][name] = {"value": value, "at": received_at}
+                        if name in EVENT_METRICS:
+                            increased = value > previous if previous is not None else value > 0
+                            if increased:
+                                entry["metric_events"].append(
+                                    {"metric": name, "from": previous or 0, "to": value, "at": received_at}
+                                )
+
+        def record_logs(self, parsed):
+            with self._lock:
+                for service_name, entries, received_at in parsed:
+                    entry = self._entry(service_name)
+                    entry["last_seen"] = max(entry["last_seen"], received_at)
+                    entry["logs"].extend(entries)
+
+        def record_traces(self, parsed):
+            with self._lock:
+                for service_name, spans, received_at in parsed:
+                    entry = self._entry(service_name)
+                    entry["last_seen"] = max(entry["last_seen"], received_at)
+                    entry["traces"].extend(spans)
+
+        def services(self):
+            with self._lock:
+                return sorted(self._services)
+
+        def window(self, service_name, seconds, since=None):
+            """Snapshot of the last `seconds` of telemetry for one service.
+
+            `since` (monotonic seconds) further restricts records to those
+            received at or after a point in time — used to verify remediation
+            against only post-remediation telemetry.
+            """
+            now = time.monotonic()
+            cutoff = now - max(0, seconds)
+            if since is not None:
+                cutoff = max(cutoff, since)
+            with self._lock:
+                entry = self._services.get(service_name)
+                if entry is None:
+                    return {
+                        "ever_seen": False,
+                        "last_seen_seconds_ago": None,
+                        "metrics": {},
+                        "metric_events": [],
+                        "logs": [],
+                        "traces": [],
+                    }
+                metrics = {
+                    name: sample["value"]
+                    for name, sample in entry["metrics"].items()
+                    if sample["at"] >= cutoff
+                }
+                metric_events = [
+                    {
+                        "metric": item["metric"],
+                        "from": item["from"],
+                        "to": item["to"],
+                        "age_seconds": round(now - item["at"], 1),
+                    }
+                    for item in entry["metric_events"]
+                    if item["at"] >= cutoff
+                ]
+                logs = [
+                    {
+                        "severity_number": item["severity_number"],
+                        "severity_text": item["severity_text"],
+                        "body": item["body"],
+                        "age_seconds": round(now - item["at"], 1),
+                    }
+                    for item in entry["logs"]
+                    if item["at"] >= cutoff
+                ]
+                traces = [
+                    {
+                        "name": item["name"],
+                        "status_code": item["status_code"],
+                        "status_message": item["status_message"],
+                        "duration_ms": item["duration_ms"],
+                        "age_seconds": round(now - item["at"], 1),
+                    }
+                    for item in entry["traces"]
+                    if item["at"] >= cutoff
+                ]
+                return {
+                    "ever_seen": True,
+                    "last_seen_seconds_ago": round(now - entry["last_seen"], 1),
+                    "metrics": metrics,
+                    "metric_events": metric_events,
+                    "logs": logs,
+                    "traces": traces,
+                }
+
+
+    def sample_metrics_payload(service_name="self-check", extra_metrics=None):
+        request = ExportMetricsServiceRequest()
+        resource_metrics = request.resource_metrics.add()
+        attribute = resource_metrics.resource.attributes.add()
+        attribute.key = "service.name"
+        attribute.value.string_value = service_name
+        metric = resource_metrics.scope_metrics.add().metrics.add()
+        metric.name = "service.uptime"
+        point = metric.gauge.data_points.add()
+        point.as_double = 1.5
+        for name, value in (extra_metrics or {}).items():
+            extra = resource_metrics.scope_metrics.add().metrics.add()
+            extra.name = name
+            extra_point = extra.gauge.data_points.add()
+            extra_point.as_double = float(value)
+        return request.SerializeToString()
+
+
+    def sample_logs_payload(service_name="self-check", body="simulated a dummy crash"):
+        request = ExportLogsServiceRequest()
+        resource_logs = request.resource_logs.add()
+        attribute = resource_logs.resource.attributes.add()
+        attribute.key = "service.name"
+        attribute.value.string_value = service_name
+        record = resource_logs.scope_logs.add().log_records.add()
+        record.severity_number = 17
+        record.severity_text = "ERROR"
+        record.body.string_value = body
+        return request.SerializeToString()
+
+
+    def sample_traces_payload(service_name="self-check", span_name="dummy-crash"):
+        request = ExportTraceServiceRequest()
+        resource_spans = request.resource_spans.add()
+        attribute = resource_spans.resource.attributes.add()
+        attribute.key = "service.name"
+        attribute.value.string_value = service_name
+        span = resource_spans.scope_spans.add().spans.add()
+        span.name = span_name
+        span.status.code = 2  # ERROR
+        span.status.message = "dummy crash"
+        span.start_time_unix_nano = 1_000_000_000
+        span.end_time_unix_nano = 1_005_000_000
+        return request.SerializeToString()
+
+
+    def format_parsed(parsed_metrics=(), parsed_logs=(), parsed_traces=()):
+        lines = []
+        for service_name, metrics, _ in parsed_metrics:
+            rendered = ", ".join(f"{name}={value}" for name, value in sorted(metrics.items()))
+            lines.append(f"{STEP}: metrics service={service_name} {rendered or '(empty)'}")
+        for service_name, entries, _ in parsed_logs:
+            for item in entries:
+                lines.append(
+                    f"{STEP}: log service={service_name} {item['severity_text']} {item['body']}"
+                )
+        for service_name, spans, _ in parsed_traces:
+            for span in spans:
+                status = {0: "unset", 1: "ok", 2: "error"}.get(span["status_code"], "?")
+                lines.append(
+                    f"{STEP}: span service={service_name} {span['name']} status={status} "
+                    f"{span['duration_ms']}ms"
+                )
+        return lines
+
+
+    class CollectorHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        store = None
+        verbose = True
+
+        def _respond_proto(self, body):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            path = self.path.split("?", 1)[0]
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = self.rfile.read(length)
+            encoding = self.headers.get("Content-Encoding")
+            if path in ("/v1/metrics", "/"):
+                parsed = parse_metrics(payload, encoding)
+                self.store.record_metrics(parsed)
+                response = ExportMetricsServiceResponse().SerializeToString()
+            elif path == "/v1/logs":
+                parsed = parse_logs(payload, encoding)
+                self.store.record_logs(parsed)
+                response = ExportLogsServiceResponse().SerializeToString()
+            elif path == "/v1/traces":
+                parsed = parse_traces(payload, encoding)
+                self.store.record_traces(parsed)
+                response = ExportTraceServiceResponse().SerializeToString()
+            else:
+                self.send_error(404, "expected /v1/metrics, /v1/logs or /v1/traces")
+                return
+            if self.verbose:
+                for line in format_parsed(
+                    parsed if path in ("/v1/metrics", "/") else (),
+                    parsed if path == "/v1/logs" else (),
+                    parsed if path == "/v1/traces" else (),
+                ):
+                    print(line, flush=True)
+            self._respond_proto(response)
+
+        def do_GET(self):
+            from urllib.parse import parse_qs, urlparse
+
+            parsed_url = urlparse(self.path)
+            if parsed_url.path == "/windows":
+                query = parse_qs(parsed_url.query)
+                seconds = float(query.get("seconds", ["120"])[0])
+                since = query.get("since", [None])[0]
+                service = query.get("service", [None])[0]
+                if service:
+                    names = [service]
+                else:
+                    names = self.store.services()
+                payload = {
+                    name: self.store.window(name, seconds, since=float(since) if since else None)
+                    for name in names
+                }
+                body = json.dumps(payload, indent=2).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed_url.path == "/":
+                page = render_dashboard(self.store).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
+            self.send_error(404, "expected / or /windows")
+
+        def log_message(self, fmt, *args):
+            return
+
+
+    def render_dashboard(store, silence_seconds=10):
+        rows = []
+        now = time.monotonic()
+        with store._lock:
+            for name in sorted(store._services):
+                entry = store._services[name]
+                last_seen = now - entry["last_seen"]
+                status = "up" if last_seen < silence_seconds else "silent"
+                error_logs = sum(
+                    1 for item in entry["logs"] if item["severity_number"] >= ERROR_SEVERITY_NUMBER
+                )
+                failed_spans = sum(1 for span in entry["traces"] if span["status_code"] == 2)
+                rows.append(
+                    "<tr>"
+                    f"<td>{html.escape(name)}</td>"
+                    f"<td>{len(entry['metrics'])}</td>"
+                    f"<td>{len(entry['logs'])} ({error_logs} errors)</td>"
+                    f"<td>{len(entry['traces'])} ({failed_spans} failed)</td>"
+                    f"<td>{last_seen:.0f}s ago</td>"
+                    f"<td>{status}</td>"
+                    "</tr>"
+                )
+        body = (
+            "<tr><td colspan=\"6\">No telemetry collected yet.</td></tr>"
+            if not rows
+            else "\n".join(rows)
+        )
+        return f"""<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta http-equiv="refresh" content="5">
+      <title>Telemetry collector</title>
+      <style>
+        body {{ font-family: "Segoe UI", Helvetica, Arial, sans-serif; margin: 2rem; background: #f4f6f8; color: #1f2933; }}
+        main {{ max-width: 64rem; }}
+        table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+        th, td {{ border: 1px solid #e2e8f0; padding: 0.6rem 0.8rem; text-align: left; vertical-align: top; }}
+        th {{ background: #eef2f6; }}
+      </style>
+    </head>
+    <body>
+      <main>
+        <h1>Telemetry collector</h1>
+        <p>{len(rows)} services. OTLP/HTTP metrics, logs and traces on port {LISTEN_PORT}.</p>
+        <table>
+          <thead>
+            <tr><th>Service</th><th>Metrics</th><th>Logs</th><th>Traces</th><th>Last telemetry</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {body}
+          </tbody>
+        </table>
+      </main>
+    </body>
+    </html>
+    """
+
+
+    def self_check():
+        store = TelemetryStore()
+        now = time.monotonic()
+        metrics = parse_metrics(sample_metrics_payload("vm-1"), received_at=now - 30)
+        if metrics[0][1].get("service.uptime") != 1.5:
+            raise SystemExit(f"{STEP}: metrics parse failed {metrics}")
+        store.record_metrics(metrics)
+        store.record_logs(parse_logs(sample_logs_payload("vm-1"), received_at=now - 30))
+        store.record_traces(parse_traces(sample_traces_payload("vm-1"), received_at=now - 30))
+        # Counter increments: the fault event is the increase, not the presence.
+        store.record_metrics(parse_metrics(
+            sample_metrics_payload("vm-1", {"dummy-crash": 0}), received_at=now - 25))
+        store.record_metrics(parse_metrics(
+            sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 26.0}), received_at=now - 20))
+        store.record_metrics(parse_metrics(
+            sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 31.0}), received_at=now - 10))
+        window = store.window("vm-1", 60)
+        if not window["ever_seen"] or window["metrics"].get("service.uptime") != 31.0:
+            raise SystemExit(f"{STEP}: window missing latest metrics {window}")
+        if len(window["metric_events"]) != 1 or window["metric_events"][0]["to"] != 1:
+            raise SystemExit(f"{STEP}: dummy-crash increment not recorded {window['metric_events']}")
+        if window["metrics"].get("dummy-crash") != 1:
+            raise SystemExit(f"{STEP}: raw counter value missing {window['metrics']}")
+        if len(window["logs"]) != 1 or window["logs"][0]["severity_number"] != 17:
+            raise SystemExit(f"{STEP}: window missing log {window['logs']}")
+        if len(window["traces"]) != 1 or window["traces"][0]["status_code"] != 2:
+            raise SystemExit(f"{STEP}: window missing trace {window['traces']}")
+        if window["traces"][0]["duration_ms"] != 5.0:
+            raise SystemExit(f"{STEP}: span duration wrong {window['traces'][0]}")
+        # A short window must exclude old records but keep the service visible.
+        short = store.window("vm-1", 5)
+        if short["metrics"] or short["logs"] or short["traces"] or short["metric_events"]:
+            raise SystemExit(f"{STEP}: short window should be empty {short}")
+        if not short["ever_seen"]:
+            raise SystemExit(f"{STEP}: short window should still see the service")
+        # Post-remediation windows only include records after `since`.
+        since = now - 15
+        fresh = store.window("vm-1", 60, since=since)
+        if fresh["logs"] or fresh["traces"] or fresh["metric_events"]:
+            raise SystemExit(f"{STEP}: since filter should drop pre-since records {fresh}")
+        if fresh["metrics"].get("dummy-crash") is None:
+            raise SystemExit(f"{STEP}: since filter kept wrong metrics {fresh['metrics']}")
+        unknown = store.window("never-seen", 60)
+        if unknown["ever_seen"] or unknown["last_seen_seconds_ago"] is not None:
+            raise SystemExit(f"{STEP}: unknown service window wrong {unknown}")
+        # First observation of a nonzero counter counts as an increment
+        # (collector restarted after the fault fired).
+        store2 = TelemetryStore()
+        store2.record_metrics(parse_metrics(
+            sample_metrics_payload("vm-2", {"dummy-crash": 1}), received_at=time.monotonic()))
+        if len(store2.window("vm-2", 60)["metric_events"]) != 1:
+            raise SystemExit(f"{STEP}: first nonzero observation should be an event")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Receive OTLP/HTTP telemetry")
+        parser.add_argument("--self-check", action="store_true")
+        parser.add_argument("--host", default=LISTEN_HOST)
+        parser.add_argument("--port", type=int, default=LISTEN_PORT)
+        parser.add_argument("--quiet", action="store_true", help="do not print received telemetry")
+        args = parser.parse_args()
+        if args.self_check:
+            self_check()
+            return
+        CollectorHandler.store = TelemetryStore()
+        CollectorHandler.verbose = not args.quiet
+        server = ThreadingHTTPServer((args.host, args.port), CollectorHandler)
+        print(f"{STEP}: listening on {args.host}:{args.port} (metrics, logs, traces)", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print(f"{STEP}: stopped", flush=True)
+        finally:
+            server.server_close()
+
+
+    if __name__ == "__main__":
+        main()
+  anomaly_detector.py: |
+    #!/usr/bin/env python3
+    """Agent 1: anomaly detector.
+
+    Examines a time window of telemetry (metrics, logs, traces) for one service
+    and decides whether an unknown error state is present. Deterministic
+    heuristics make the decision; a configured LLM only phrases the summary, so
+    the trigger behavior is identical with or without a model.
+
+    Triggers:
+    - metrics-silent:      the service was seen but stopped sending telemetry
+    - dummy-crash-metric:  the demo fault counter incremented
+    - error-logs:          OTel log records at ERROR severity or higher
+    - failed-spans:        trace spans with ERROR status
+    - cpu-saturation / memory-pressure: host gauges above threshold
+
+    Verify:
+
+        python3 3_langgraph_workflow/anomaly_detector.py --self-check
+    """
+
+    import argparse
+
+    import llm
+    import state
+
+    STEP = "agent 1 anomaly detector"
+    CPU_THRESHOLD_PERCENT = 90.0
+    MEMORY_THRESHOLD_PERCENT = 90.0
+    ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR and above
+
+
+    def _is_error_log(entry):
+        if entry.get("severity_number", 0) >= ERROR_SEVERITY_NUMBER:
+            return True
+        return entry.get("severity_text", "").upper() in ("ERROR", "CRITICAL", "FATAL")
+
+
+    def _is_failed_span(span):
+        return span.get("status_code") == 2
+
+
+    def analyze_window(window, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
+        """Return the anomaly dict for one telemetry window (pure function)."""
+        signals = []
+        reasons = []
+        metrics = window.get("metrics", {})
+        logs = window.get("logs", [])
+        traces = window.get("traces", [])
+        last_seen = window.get("last_seen_seconds_ago")
+
+        if window.get("ever_seen") and last_seen is not None and last_seen > silence_seconds:
+            signals.append("metrics-silent")
+            reasons.append(f"no telemetry for {last_seen:.0f}s (silence threshold {silence_seconds:.0f}s)")
+        events = window.get("metric_events")
+        if events is not None:
+            # OTel counters are cumulative: the fault signal is the increment
+            # inside the window, not the counter's presence. A restart that
+            # clears the fault produces no further increments.
+            crash_events = [item for item in events if item.get("metric") == "dummy-crash"]
+            if crash_events:
+                signals.append("dummy-crash-metric")
+                reasons.append(f"dummy-crash counter incremented to {crash_events[-1].get('to')}")
+        elif metrics.get("dummy-crash", 0) > 0:
+            signals.append("dummy-crash-metric")
+            reasons.append(f"dummy-crash counter at {metrics.get('dummy-crash')}")
+        error_logs = [entry for entry in logs if _is_error_log(entry)]
+        if error_logs:
+            signals.append("error-logs")
+            reasons.append(f"{len(error_logs)} ERROR log record(s), latest: "
+                           f"{error_logs[-1].get('body', '')[:80]}")
+        failed_spans = [span for span in traces if _is_failed_span(span)]
+        if failed_spans:
+            signals.append("failed-spans")
+            reasons.append(f"{len(failed_spans)} failed span(s): "
+                           f"{failed_spans[-1].get('name', '')}")
+        cpu = metrics.get("service.cpu.load")
+        if cpu is not None and cpu > CPU_THRESHOLD_PERCENT:
+            signals.append("cpu-saturation")
+            reasons.append(f"service.cpu.load at {cpu:.1f}%")
+        memory = metrics.get("service.memory.load")
+        if memory is not None and memory > MEMORY_THRESHOLD_PERCENT:
+            signals.append("memory-pressure")
+            reasons.append(f"service.memory.load at {memory:.1f}%")
+
+        detected = bool(signals)
+        score = len(signals) + (1 if "metrics-silent" in signals else 0)
+        if not detected:
+            severity = "none"
+        elif "metrics-silent" in signals or score >= 3:
+            severity = "high"
+        elif score == 2:
+            severity = "medium"
+        else:
+            severity = "low"
+        summary = "; ".join(reasons) if reasons else "telemetry within normal bounds"
+        return {
+            "detected": detected,
+            "signals": signals,
+            "reasons": reasons,
+            "score": score,
+            "severity": severity,
+            "summary": summary,
+        }
+
+
+    def _llm_summary(service_name, anomaly):
+        """Ask the LLM for a one-sentence incident summary (best effort)."""
+        prompt = (
+            "You are an ITOps anomaly detector. Summarize the anomaly for a service "
+            "in one or two sentences for an operations dashboard. Reply with only a "
+            "JSON object like {\"summary\": \"...\"}.\n\n"
+            f"Service: {service_name}\n"
+            f"Signals: {', '.join(anomaly['signals'])}\n"
+            f"Details: {'; '.join(anomaly['reasons'])}\n"
+        )
+        reply = llm.chat_json([{"role": "user", "content": prompt}])
+        summary = reply.get("summary")
+        return summary if isinstance(summary, str) and summary.strip() else None
+
+
+    def build_node(silence_seconds=state.DEFAULT_SILENCE_SECONDS, use_llm=True):
+        """Return the LangGraph node for the anomaly detector."""
+
+        def detector_node(workflow_state):
+            from langgraph.types import Command
+
+            service_name = workflow_state["service_name"]
+            anomaly = analyze_window(workflow_state.get("telemetry", {}), silence_seconds)
+            attempts = workflow_state.get("attempts", 0)
+            max_attempts = workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS)
+            finding = (
+                f"[{STEP}] service={service_name} anomaly={anomaly['detected']} "
+                f"severity={anomaly['severity']} signals={','.join(anomaly['signals']) or '-'} "
+                f"attempts={attempts}/{max_attempts}"
+            )
+            if not anomaly["detected"]:
+                status = state.STATUS_REMEDIATED if attempts else state.STATUS_HEALTHY
+                if attempts:
+                    finding = f"[{STEP}] verification passed: telemetry back to normal, remediation confirmed"
+                update = {"anomaly": anomaly, "status": status, "findings": [finding]}
+                return Command(goto="__end__", update=update)
+            if use_llm and llm.available():
+                try:
+                    summary = _llm_summary(service_name, anomaly)
+                    if summary:
+                        anomaly = {**anomaly, "summary": summary}
+                except Exception as exc:  # noqa: BLE001 - LLM is best effort
+                    finding += f" (llm summary failed: {exc})"[:200]
+            if attempts >= max_attempts:
+                update = {
+                    "anomaly": anomaly,
+                    "status": state.STATUS_FAILED,
+                    "findings": [finding + " -> giving up: max remediation attempts reached"],
+                }
+                return Command(goto="__end__", update=update)
+            update = {"anomaly": anomaly, "status": state.STATUS_INVESTIGATING, "findings": [finding]}
+            return Command(goto=state.NODE_RCA, update=update)
+
+        return detector_node
+
+
+    def self_check():
+        healthy = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 2.0,
+            "metrics": {"service.uptime": 10.0, "service.cpu.load": 5.0},
+            "logs": [],
+            "traces": [],
+        }
+        anomaly = analyze_window(healthy)
+        if anomaly["detected"] or anomaly["severity"] != "none":
+            raise SystemExit(f"{STEP}: healthy window flagged {anomaly}")
+
+        crashed = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 3.0,
+            "metrics": {"service.uptime": 187.0, "dummy-crash": 1},
+            "metric_events": [{"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}],
+            "logs": [
+                {"severity_number": 17, "severity_text": "ERROR", "body": "simulated a dummy crash"},
+                {"severity_number": 9, "severity_text": "INFO", "body": "page served"},
+            ],
+            "traces": [{"name": "dummy-crash", "status_code": 2, "status_message": "dummy crash"}],
+        }
+        anomaly = analyze_window(crashed)
+        for expected in ("dummy-crash-metric", "error-logs", "failed-spans"):
+            if expected not in anomaly["signals"]:
+                raise SystemExit(f"{STEP}: missing signal {expected} in {anomaly['signals']}")
+        if not anomaly["detected"] or anomaly["severity"] != "high":
+            raise SystemExit(f"{STEP}: crash window not flagged high {anomaly}")
+
+        # Post-remediation shape: the counter is still present (cumulative) but
+        # no increment happened inside the window -> no fault signal.
+        cleared = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 1.0,
+            "metrics": {"service.uptime": 12.0, "dummy-crash": 1},
+            "metric_events": [],
+            "logs": [],
+            "traces": [],
+        }
+        anomaly = analyze_window(cleared)
+        if anomaly["detected"]:
+            raise SystemExit(f"{STEP}: cleared window must not flag the stale counter {anomaly}")
+
+        # Windows without metric_events (synthetic shapes) fall back to the raw value.
+        legacy = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 2.0,
+            "metrics": {"dummy-crash": 1},
+            "logs": [],
+            "traces": [],
+        }
+        if "dummy-crash-metric" not in analyze_window(legacy)["signals"]:
+            raise SystemExit(f"{STEP}: legacy raw-value window should flag the counter")
+
+        silent = {"ever_seen": True, "last_seen_seconds_ago": 42.0, "metrics": {}, "logs": [], "traces": []}
+        anomaly = analyze_window(silent)
+        if "metrics-silent" not in anomaly["signals"] or anomaly["severity"] != "high":
+            raise SystemExit(f"{STEP}: silent window not flagged {anomaly}")
+
+        unknown = {"ever_seen": False, "last_seen_seconds_ago": None, "metrics": {}, "logs": [], "traces": []}
+        if analyze_window(unknown)["detected"]:
+            raise SystemExit(f"{STEP}: never-seen service must not be flagged")
+
+        saturated = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 1.0,
+            "metrics": {"service.cpu.load": 97.5, "service.memory.load": 95.0},
+            "logs": [],
+            "traces": [],
+        }
+        anomaly = analyze_window(saturated)
+        if "cpu-saturation" not in anomaly["signals"] or "memory-pressure" not in anomaly["signals"]:
+            raise SystemExit(f"{STEP}: saturation window not flagged {anomaly}")
+
+        # Node-level check: routing on a healthy window ends the workflow.
+        from langgraph.types import Command
+
+        node = build_node()
+        result = node(state.initial_state("vm-1", telemetry=healthy))
+        if not isinstance(result, Command) or result.goto != "__end__":
+            raise SystemExit(f"{STEP}: healthy window should end workflow, got {result}")
+        result = node(state.initial_state("vm-1", telemetry=crashed))
+        if not isinstance(result, Command) or result.goto != state.NODE_RCA:
+            raise SystemExit(f"{STEP}: anomaly should route to RCA, got {result}")
+        exhausted = {**state.initial_state("vm-1", telemetry=crashed), "attempts": 3, "max_attempts": 3}
+        result = node(exhausted)
+        if result.goto != "__end__" or result.update.get("status") != state.STATUS_FAILED:
+            raise SystemExit(f"{STEP}: exhausted attempts should fail, got {result}")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Agent 1: anomaly detector")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if not args.self_check:
+            raise SystemExit("pass --self-check; the workflow calls analyze_window() with live windows")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  root_cause_analyzer.py: |
+    #!/usr/bin/env python3
+    """Agent 2: root cause analyzer (the inner loop).
+
+    Iterates to dig deeper into the anomaly using tools from MCP servers. Each
+    iteration either calls one MCP tool (typically the linux-mcp server that can
+    run commands and read files on the affected VM) or concludes with a root
+    cause. The loop repeats until a root cause is found, the iteration budget is
+    spent, or the tools stop adding information.
+
+    With a configured LLM the next tool call is chosen by the model from the
+    live MCP tools/list result; without one a deterministic playbook runs the
+    same shape of investigation. Either way every iteration is recorded in the
+    append-only `investigation` channel.
+
+    Verify:
+
+        python3 3_langgraph_workflow/root_cause_analyzer.py --self-check
+    """
+
+    import argparse
+    import json
+
+    import llm
+    import mcp_client
+    import state
+
+    STEP = "agent 2 root cause analyzer"
+    SERVICE_UNIT = "aiops-demo.service"
+    EXEC_TOOL_CANDIDATES = ("run_command", "execute_command", "exec", "shell", "command")
+    FALLBACK_COMMANDS = (
+        f"systemctl status {SERVICE_UNIT}",
+        f"journalctl -u {SERVICE_UNIT} -n 50 --no-pager",
+    )
+    MAX_OUTPUT_CHARS = 400
+
+
+    def truncate(text, limit=MAX_OUTPUT_CHARS):
+        text = (text or "").strip().replace("\n", " | ")
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+    def pick_exec_tool(tools, preferred=None):
+        """Choose the command-execution tool from an MCP tools/list result."""
+        names = [tool.get("name", "") for tool in tools]
+        for candidate in ([preferred] if preferred else []) + list(EXEC_TOOL_CANDIDATES):
+            if candidate in names:
+                return candidate
+        for name in names:
+            lowered = name.lower()
+            if "command" in lowered or "exec" in lowered or "shell" in lowered:
+                return name
+        return names[0] if names else None
+
+
+    def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
+        """Ask the LLM for the next investigation action as a JSON decision."""
+        tool_catalog = [
+            {"name": tool.get("name"), "description": tool.get("description", ""),
+             "inputSchema": tool.get("inputSchema", {})}
+            for tool in tools
+        ]
+        history = [
+            {"iteration": item["iteration"], "tool": item["tool"],
+             "arguments": item["arguments"], "output": item["output"][:200]}
+            for item in investigation
+        ]
+        prompt = (
+            "You are a root cause analysis agent in an autonomous ITOps workflow. "
+            "Find the root cause of an anomaly on one service by calling MCP tools "
+            "one at a time (inner loop). Choose exactly one action.\n\n"
+            "Reply with ONLY a JSON object, either:\n"
+            '{"action": "call_tool", "tool": "<name>", "arguments": {...}}\n'
+            "or, once you know the root cause:\n"
+            '{"action": "conclude", "root_cause": {"component": "...", "summary": "...", '
+            '"confidence": "high|medium|low"}}\n\n'
+            f"Iteration: {iteration}/{max_iterations}\n"
+            f"Service anomaly: {json.dumps(anomaly)[:600]}\n"
+            f"MCP tools available: {json.dumps(tool_catalog)[:1500]}\n"
+            f"Investigation so far: {json.dumps(history)[:2000] or 'none yet'}\n"
+        )
+        return llm.chat_json([{"role": "user", "content": prompt}])
+
+
+    def _fallback_next_action(investigation, tools, iteration):
+        """Deterministic playbook when no LLM is configured."""
+        exec_tool = pick_exec_tool(tools)
+        if exec_tool and iteration <= len(FALLBACK_COMMANDS):
+            command = FALLBACK_COMMANDS[iteration - 1]
+            return {"action": "call_tool", "tool": exec_tool, "arguments": {"command": command}}
+        return {"action": "conclude", "root_cause": _conclude(investigation)}
+
+
+    def _conclude(investigation):
+        """Derive a root cause from the investigation outputs."""
+        evidence = [item for item in investigation if item.get("status") == "ok"]
+        text = " ".join(item.get("output", "") for item in evidence).lower()
+        if "dummy crash" in text or "dummy-crash" in text:
+            summary = (
+                f"The application reported a dummy-crash fault (ERROR log, failed span, "
+                f"dummy-crash metric). The process is still running but is in an error "
+                f"state that persists until {SERVICE_UNIT} is restarted."
+            )
+            component = SERVICE_UNIT
+            confidence = "high"
+        elif "active: failed" in text or "inactive" in text or "result: exit-code" in text:
+            summary = (
+                f"The {SERVICE_UNIT} systemd unit is not running (exit-code failure). "
+                f"The unit has Restart=no, so nothing restarts it automatically."
+            )
+            component = SERVICE_UNIT
+            confidence = "high"
+        elif "cpu" in text and "load average" in text:
+            summary = "Host resource saturation is degrading the service."
+            component = "host"
+            confidence = "medium"
+        else:
+            summary = "Unhealthy state observed; no single component isolated from the collected evidence."
+            component = "unknown"
+            confidence = "low"
+        return {
+            "found": True,
+            "component": component,
+            "summary": summary,
+            "evidence": [truncate(item.get("output", ""), 200) for item in evidence],
+            "confidence": confidence,
+        }
+
+
+    def build_node(linux_mcp=None, use_llm=True):
+        """Return the LangGraph node for the root cause analyzer (inner loop)."""
+
+        def rca_node(workflow_state):
+            from langgraph.types import Command
+
+            iteration = workflow_state.get("iteration", 0) + 1
+            max_iterations = workflow_state.get("max_iterations", state.DEFAULT_MAX_ITERATIONS)
+            service_name = workflow_state["service_name"]
+            anomaly = workflow_state.get("anomaly", {})
+            investigation = list(workflow_state.get("investigation", []))
+
+            tools = []
+            if linux_mcp is not None:
+                try:
+                    tools = linux_mcp.list_tools()
+                except mcp_client.McpError as exc:
+                    investigation.append(
+                        {"iteration": iteration, "tool": "tools/list", "arguments": {},
+                         "output": truncate(str(exc)), "status": "error"}
+                    )
+
+            decision = None
+            if use_llm and llm.available() and tools:
+                try:
+                    decision = _llm_next_action(anomaly, investigation, tools, iteration, max_iterations)
+                except Exception:  # noqa: BLE001 - LLM is best effort
+                    decision = None
+            if decision is None:
+                if linux_mcp is None:
+                    # No MCP server configured: conclude from telemetry alone.
+                    decision = {"action": "conclude", "root_cause": {
+                        "found": True,
+                        "component": SERVICE_UNIT,
+                        "summary": f"No linux MCP server configured; concluding from the anomaly "
+                                   f"signals alone: {anomaly.get('summary', 'unknown error state')}.",
+                        "evidence": [],
+                        "confidence": "low",
+                    }}
+                else:
+                    decision = _fallback_next_action(investigation, tools, iteration)
+
+            if decision.get("action") == "call_tool" and iteration <= max_iterations:
+                tool = decision.get("tool") or ""
+                arguments = decision.get("arguments") or {}
+                if tool not in [item.get("name") for item in tools]:
+                    # Unapproved or unknown tool: fall back to a known-good call.
+                    fallback = _fallback_next_action(investigation, tools, iteration)
+                    if fallback.get("action") == "call_tool":
+                        tool, arguments = fallback["tool"], fallback["arguments"]
+                    else:
+                        decision = fallback
+                if decision.get("action") == "call_tool":
+                    try:
+                        output = linux_mcp.call_tool(tool, arguments)
+                        status = "ok"
+                    except (mcp_client.McpError, OSError) as exc:
+                        output, status = str(exc), "error"
+                    entry = {
+                        "iteration": iteration,
+                        "tool": tool,
+                        "arguments": arguments,
+                        "output": truncate(output),
+                        "status": status,
+                    }
+                    finding = (
+                        f"[{STEP}] iteration {iteration}/{max_iterations}: "
+                        f"{tool} {json.dumps(arguments)} -> {truncate(output, 160)}"
+                    )
+                    return Command(
+                        goto=state.NODE_RCA,
+                        update={
+                            "iteration": iteration,
+                            "investigation": [entry],
+                            "findings": [finding],
+                        },
+                    )
+
+            # Conclude (or the iteration budget is spent).
+            root_cause = decision.get("root_cause") or _conclude(investigation)
+            root_cause.setdefault("found", True)
+            if iteration > max_iterations:
+                root_cause["found"] = bool(root_cause.get("confidence") != "low")
+                root_cause["summary"] = (
+                    f"Iteration budget spent ({max_iterations}). Best hypothesis: "
+                    + root_cause.get("summary", "")
+                )
+            finding = (
+                f"[{STEP}] root cause found (confidence={root_cause.get('confidence', 'n/a')}): "
+                f"{root_cause.get('summary', '')} [component={root_cause.get('component', '?')}]"
+            )
+            return Command(
+                goto=state.NODE_SELECTOR,
+                update={
+                    "iteration": iteration,
+                    "root_cause": root_cause,
+                    "findings": [finding],
+                },
+            )
+
+        return rca_node
+
+
+    def self_check():
+        calls = []
+
+        def handler(name, arguments):
+            calls.append((name, arguments))
+            if arguments.get("command", "").startswith("systemctl"):
+                return "Active: active (running) since Tue 2026-11-17; Main PID: 2841"
+            if arguments.get("command", "").startswith("journalctl"):
+                return "python3[2841]: service app sent dummy-crash event\npython3[2841]: ERROR: service app simulated a dummy crash"
+            return "[mock] ok"
+
+        tools = [
+            {"name": "run_command", "description": "Run a shell command",
+             "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}}},
+        ]
+        linux = mcp_client.FakeMcpClient(tools, handler)
+        node = build_node(linux_mcp=linux, use_llm=False)
+
+        workflow_state = state.initial_state("vm-1")
+        workflow_state["anomaly"] = {"detected": True, "signals": ["error-logs"], "summary": "error logs"}
+        from langgraph.types import Command
+
+        iterations = 0
+        while True:
+            result = node(workflow_state)
+            iterations += 1
+            if not isinstance(result, Command):
+                raise SystemExit(f"{STEP}: node must return a Command, got {result}")
+            # Apply the update the way LangGraph would (append-only channels).
+            for key, value in (result.update or {}).items():
+                if key in ("investigation", "findings"):
+                    workflow_state[key] = workflow_state.get(key, []) + value
+                else:
+                    workflow_state[key] = value
+            if result.goto == state.NODE_SELECTOR:
+                break
+            if result.goto != state.NODE_RCA:
+                raise SystemExit(f"{STEP}: unexpected goto {result.goto}")
+            if iterations > 6:
+                raise SystemExit(f"{STEP}: inner loop did not terminate")
+        if iterations < 2:
+            raise SystemExit(f"{STEP}: expected at least one dig-deeper iteration, got {iterations}")
+        root_cause = workflow_state["root_cause"]
+        if not root_cause["found"] or root_cause["component"] != SERVICE_UNIT:
+            raise SystemExit(f"{STEP}: bad root cause {root_cause}")
+        if root_cause["confidence"] != "high" or "dummy-crash" not in root_cause["summary"]:
+            raise SystemExit(f"{STEP}: crash evidence not concluded {root_cause}")
+        if len(calls) < 2:
+            raise SystemExit(f"{STEP}: expected 2 tool calls, got {len(calls)}")
+
+        # No MCP configured: must still conclude and route onward.
+        node = build_node(linux_mcp=None, use_llm=False)
+        result = node(state.initial_state("vm-1"))
+        if result.goto != state.NODE_SELECTOR or not result.update["root_cause"]["found"]:
+            raise SystemExit(f"{STEP}: no-MCP fallback should conclude, got {result}")
+
+        # Iteration budget: one tool call, then the loop must conclude.
+        budget_calls = []
+
+        def budget_handler(name, arguments):
+            budget_calls.append((name, arguments))
+            return "Active: active (running) since Tue 2026-11-17"
+
+        budget_linux = mcp_client.FakeMcpClient(tools, budget_handler)
+        node = build_node(linux_mcp=budget_linux, use_llm=False)
+        workflow_state = state.initial_state("vm-1", max_iterations=1)
+        workflow_state["anomaly"] = {"detected": True, "signals": [], "summary": "unknown"}
+        passes = 0
+        while True:
+            result = node(workflow_state)
+            passes += 1
+            for key, value in (result.update or {}).items():
+                if key in ("investigation", "findings"):
+                    workflow_state[key] = workflow_state.get(key, []) + value
+                else:
+                    workflow_state[key] = value
+            if result.goto == state.NODE_SELECTOR:
+                break
+            if result.goto != state.NODE_RCA or passes > 4:
+                raise SystemExit(f"{STEP}: budget run should conclude, got {result.goto} at pass {passes}")
+        if len(budget_calls) != 1:
+            raise SystemExit(f"{STEP}: budget of 1 should allow exactly one tool call, got {len(budget_calls)}")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Agent 2: root cause analyzer")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if not args.self_check:
+            raise SystemExit("pass --self-check; the workflow runs this agent as a graph node")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  remediation_selector.py: |
+    #!/usr/bin/env python3
+    """Agent 3: remediation selector (and the executor that closes the outer loop).
+
+    The selector asks the Ansible MCP server for its approved commands
+    (tools/list is the allowlist) and assembles the remediation steps required
+    by the root cause. Steps that name a tool outside the approved list are
+    rejected before anything runs.
+
+    The executor runs the approved plan through the same Ansible MCP server,
+    then routes back to the anomaly detector with a post-remediation telemetry
+    window (the outer loop): the workflow only reports success once the service
+    is verified healthy again.
+
+    Verify:
+
+        python3 3_langgraph_workflow/remediation_selector.py --self-check
+    """
+
+    import argparse
+    import json
+    import time
+
+    import llm
+    import mcp_client
+    import state
+
+    STEP = "agent 3 remediation selector"
+    SERVICE_UNIT = "aiops-demo.service"
+    RESTART_TOOL_CANDIDATES = ("restart_service", "run_module", "run_ansible_module", "run_playbook")
+    VERIFY_POLL_SECONDS = 2
+
+
+    def truncate(text, limit=300):
+        text = (text or "").strip().replace("\n", " | ")
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+    def _approved_plan(root_cause, tools, service_name):
+        """Deterministic plan: restart the faulted unit with an approved tool."""
+        names = [tool.get("name", "") for tool in tools]
+        tool = next((name for name in RESTART_TOOL_CANDIDATES if name in names), None)
+        if tool is None:
+            return {"steps": [], "rationale": "no approved remediation tool available"}
+        component = root_cause.get("component") or SERVICE_UNIT
+        if tool == "restart_service":
+            arguments = {"service": component}
+        elif tool == "run_playbook":
+            arguments = {"playbook": "restart-aiops-demo.yml", "extra_vars": {"service": component}}
+        else:
+            arguments = {
+                "host": service_name,
+                "module": "ansible.builtin.systemd",
+                "arguments": {"name": component, "state": "restarted"},
+            }
+        return {
+            "steps": [
+                {
+                    "tool": tool,
+                    "arguments": arguments,
+                    "rationale": f"restart {component} on {service_name} to clear the error state",
+                }
+            ],
+            "rationale": (
+                f"Root cause points at {component}; restarting the unit is the approved "
+                f"remediation and clears the fault state without touching other services."
+            ),
+        }
+
+
+    def _llm_plan(root_cause, tools, service_name):
+        """Ask the LLM to assemble a plan strictly from the approved tools."""
+        catalog = [
+            {"name": tool.get("name"), "description": tool.get("description", ""),
+             "inputSchema": tool.get("inputSchema", {})}
+            for tool in tools
+        ]
+        prompt = (
+            "You are a remediation selector agent in an autonomous ITOps workflow. "
+            "Assemble the smallest safe remediation for the root cause below. You may "
+            "ONLY use tools from the approved list returned by the Ansible MCP server; "
+            "any other tool will be rejected.\n\n"
+            "Reply with ONLY a JSON object:\n"
+            '{"steps": [{"tool": "<approved tool name>", "arguments": {...}, '
+            '"rationale": "..."}], "rationale": "..."}\n\n'
+            f"Service: {service_name}\n"
+            f"Root cause: {json.dumps(root_cause)[:800]}\n"
+            f"Approved tools: {json.dumps(catalog)[:1500]}\n"
+        )
+        return llm.chat_json([{"role": "user", "content": prompt}])
+
+
+    def _approved_names(ansible_mcp):
+        try:
+            return [tool.get("name", "") for tool in ansible_mcp.list_tools()]
+        except mcp_client.McpError:
+            return []
+
+
+    def build_selector_node(ansible_mcp=None, use_llm=True):
+        """Return the LangGraph node that assembles the approved remediation plan."""
+
+        def selector_node(workflow_state):
+            from langgraph.types import Command
+
+            service_name = workflow_state["service_name"]
+            root_cause = workflow_state.get("root_cause", {})
+            approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
+            tools = [{"name": name} for name in approved]
+
+            plan = None
+            if use_llm and llm.available() and approved:
+                try:
+                    plan = _llm_plan(root_cause, tools, service_name)
+                except Exception:  # noqa: BLE001 - LLM is best effort
+                    plan = None
+            if plan is None:
+                plan = _approved_plan(root_cause, tools, service_name) if tools else {
+                    "steps": [], "rationale": "Ansible MCP server not configured"
+                }
+
+            steps = []
+            rejected = []
+            for step in plan.get("steps", []):
+                if isinstance(step, dict) and step.get("tool") in approved:
+                    steps.append(step)
+                else:
+                    rejected.append(step.get("tool") if isinstance(step, dict) else str(step))
+            remediation = {
+                "plan": steps,
+                "rationale": plan.get("rationale", ""),
+                "approved_tools": approved,
+            }
+            findings = [
+                f"[{STEP}] approved tools: {', '.join(approved) or 'none'}",
+                f"[{STEP}] plan ({len(steps)} step(s)): " + (
+                    "; ".join(
+                        f"{index + 1}) {step['tool']} {json.dumps(step['arguments'])} - {step.get('rationale', '')}"
+                        for index, step in enumerate(steps)
+                    )
+                    or "no approved remediation possible"
+                ),
+            ]
+            for name in rejected:
+                findings.append(f"[{STEP}] rejected unapproved step: {name}")
+            if not steps:
+                update = {
+                    "remediation": remediation,
+                    "status": state.STATUS_FAILED,
+                    "findings": findings + [f"[{STEP}] no approved remediation available; giving up"],
+                }
+                return Command(goto="__end__", update=update)
+            update = {
+                "remediation": remediation,
+                "status": state.STATUS_REMEDIATING,
+                "findings": findings,
+            }
+            return Command(goto=state.NODE_EXECUTOR, update=update)
+
+        return selector_node
+
+
+    def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30):
+        """Return the LangGraph node that executes the plan and re-verifies."""
+
+        def executor_node(workflow_state):
+            from langgraph.types import Command
+
+            service_name = workflow_state["service_name"]
+            window_seconds = workflow_state.get("window_seconds", state.DEFAULT_WINDOW_SECONDS)
+            plan = workflow_state.get("remediation", {}).get("plan", [])
+            approved = set(workflow_state.get("remediation", {}).get("approved_tools", []))
+            attempts = workflow_state.get("attempts", 0) + 1
+            max_attempts = workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS)
+
+            results = []
+            ok = True
+            for step in plan:
+                tool = step.get("tool", "")
+                if tool not in approved:
+                    results.append({"step": step, "ok": False, "output": "unapproved tool"})
+                    ok = False
+                    continue
+                try:
+                    output = ansible_mcp.call_tool(tool, step.get("arguments") or {})
+                    results.append({"step": step, "ok": True, "output": truncate(output)})
+                except (mcp_client.McpError, OSError, AttributeError) as exc:
+                    results.append({"step": step, "ok": False, "output": truncate(str(exc))})
+                    ok = False
+            findings = [
+                f"[{STEP} executor] attempt {attempts}/{max_attempts}: "
+                + ("; ".join(
+                    f"{index + 1}) {'ok' if item['ok'] else 'FAILED'} {item['step']['tool']} -> {item['output'][:120]}"
+                    for index, item in enumerate(results)
+                ) or "nothing to run")
+            ]
+            update = {
+                "attempts": attempts,
+                "remediation_result": {"steps": results, "ok": ok, "attempts": attempts},
+                "findings": findings,
+            }
+            if not ok:
+                update["status"] = state.STATUS_FAILED
+                return Command(goto="__end__", update=update)
+
+            # Outer loop: verify against telemetry received after the remediation.
+            verify_since = time.monotonic()
+            telemetry = workflow_state.get("telemetry", {})
+            if get_window is not None:
+                telemetry = get_window(service_name, window_seconds, since=verify_since)
+                deadline = time.monotonic() + max(0, verify_wait_seconds)
+                while time.monotonic() < deadline:
+                    if telemetry.get("metrics"):
+                        break  # fresh post-remediation telemetry is arriving
+                    time.sleep(VERIFY_POLL_SECONDS)
+                    telemetry = get_window(service_name, window_seconds, since=verify_since)
+            findings = [findings[0] + " -> handing over to the anomaly detector for verification"]
+            update.update(
+                {
+                    "telemetry": telemetry,
+                    "verify_since": verify_since,
+                    "iteration": 0,
+                    "status": state.STATUS_REMEDIATING,
+                    "findings": findings,
+                }
+            )
+            return Command(goto=state.NODE_DETECTOR, update=update)
+
+        return executor_node
+
+
+    def self_check():
+        from langgraph.types import Command
+
+        import mock_mcp_server
+
+        ansible = mcp_client.FakeMcpClient(mock_mcp_server.ansible_tools(), mock_mcp_server.ansible_call)
+        selector = build_selector_node(ansible_mcp=ansible, use_llm=False)
+        root_cause = {
+            "found": True,
+            "component": SERVICE_UNIT,
+            "summary": "dummy-crash fault state persists until restart",
+            "confidence": "high",
+        }
+        workflow_state = state.initial_state("vm-1")
+        workflow_state["root_cause"] = root_cause
+        result = selector(workflow_state)
+        if result.goto != state.NODE_EXECUTOR:
+            raise SystemExit(f"{STEP}: selector should route to executor, got {result.goto}")
+        plan = result.update["remediation"]["plan"]
+        if len(plan) != 1 or plan[0]["tool"] != "run_module":
+            raise SystemExit(f"{STEP}: unexpected plan {plan}")
+        if plan[0]["arguments"]["module"] != "ansible.builtin.systemd":
+            raise SystemExit(f"{STEP}: plan should use systemd module {plan[0]['arguments']}")
+
+        # Unapproved tools must be rejected before execution.
+        class BadLlm:
+            @staticmethod
+            def chat_json(messages):
+                return {"steps": [{"tool": "format_disk", "arguments": {}}], "rationale": "nope"}
+
+        saved = llm.chat_json
+        llm.chat_json = BadLlm.chat_json
+        try:
+            saved_available = llm.available
+            llm.available = lambda: True
+            strict_selector = build_selector_node(ansible_mcp=ansible, use_llm=True)
+            result = strict_selector(workflow_state)
+        finally:
+            llm.chat_json = saved
+            llm.available = saved_available
+        if result.goto != "__end__" or result.update["status"] != state.STATUS_FAILED:
+            raise SystemExit(f"{STEP}: unapproved plan must fail safely, got {result.goto}")
+        if result.update["remediation"]["plan"]:
+            raise SystemExit(f"{STEP}: unapproved step must not survive {result.update['remediation']}")
+
+        # Executor: run the plan, then hand back to the detector with fresh telemetry.
+        healthy = {
+            "ever_seen": True,
+            "last_seen_seconds_ago": 1.0,
+            "metrics": {"service.uptime": 1.0},
+            "logs": [],
+            "traces": [],
+        }
+        windows = {"calls": 0}
+
+        def get_window(service, seconds, since=None):
+            windows["calls"] += 1
+            return healthy
+
+        executor = build_executor_node(ansible_mcp=ansible, get_window=get_window, verify_wait_seconds=0)
+        workflow_state = state.initial_state("vm-1")
+        workflow_state["root_cause"] = root_cause
+        selector_result = selector(workflow_state)
+        for key, value in selector_result.update.items():
+            if key in ("findings",):
+                workflow_state[key] = workflow_state.get(key, []) + value
+            else:
+                workflow_state[key] = value
+        result = executor(workflow_state)
+        if result.goto != state.NODE_DETECTOR:
+            raise SystemExit(f"{STEP}: executor should verify via detector, got {result.goto}")
+        if result.update["attempts"] != 1 or not result.update["remediation_result"]["ok"]:
+            raise SystemExit(f"{STEP}: executor result wrong {result.update['remediation_result']}")
+        if result.update["telemetry"] is not healthy:
+            raise SystemExit(f"{STEP}: executor should refresh telemetry for verification")
+
+        # A failing tool must end the workflow as failed, not loop.
+        def fail_handler(name, arguments):
+            raise ValueError("ansible unreachable")
+
+        failing = mcp_client.FakeMcpClient(mock_mcp_server.ansible_tools(), fail_handler)
+        executor = build_executor_node(ansible_mcp=failing, get_window=get_window, verify_wait_seconds=0)
+        result = executor(workflow_state)
+        if result.goto != "__end__" or result.update["status"] != state.STATUS_FAILED:
+            raise SystemExit(f"{STEP}: failed execution should stop, got {result.goto}")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Agent 3: remediation selector")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if not args.self_check:
+            raise SystemExit("pass --self-check; the workflow runs this agent as a graph node")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  graph.py: |
+    #!/usr/bin/env python3
+    """Assemble the multi-agent workflow as a LangGraph StateGraph.
+
+        START -> anomaly_detector
+                     |  no anomaly -> END (healthy / remediation verified)
+                     v
+               root_cause_analyzer  <-- inner loop: iterates through MCP tools
+                     |  root cause found
+                     v
+               remediation_selector  (approved commands from the Ansible MCP server)
+                     v
+               remediation_executor  -> anomaly_detector  (outer loop verification)
+
+    Nodes route with langgraph Command objects; `investigation` and `findings`
+    are append-only channels, so the full decision trail survives every loop.
+
+    Verify:
+
+        python3 3_langgraph_workflow/graph.py --self-check
+    """
+
+    import argparse
+
+    import anomaly_detector
+    import mcp_client
+    import remediation_selector
+    import root_cause_analyzer
+    import state
+    from state import WorkflowState
+
+
+    def build_graph(
+        linux_mcp=None,
+        ansible_mcp=None,
+        get_window=None,
+        use_llm=True,
+        silence_seconds=state.DEFAULT_SILENCE_SECONDS,
+        verify_wait_seconds=state.DEFAULT_VERIFY_WAIT_SECONDS,
+    ):
+        """Compile the workflow graph. Dependencies are injected for testability:
+        real MCP clients and live windows in production, fakes in self-checks."""
+        from langgraph.graph import END, START, StateGraph
+
+        graph = StateGraph(WorkflowState)
+        graph.add_node(state.NODE_DETECTOR, anomaly_detector.build_node(
+            silence_seconds=silence_seconds, use_llm=use_llm))
+        graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
+            linux_mcp=linux_mcp, use_llm=use_llm))
+        graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
+            ansible_mcp=ansible_mcp, use_llm=use_llm))
+        graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
+            ansible_mcp=ansible_mcp, get_window=get_window, verify_wait_seconds=verify_wait_seconds))
+        graph.add_edge(START, state.NODE_DETECTOR)
+        # All other routing is dynamic: nodes return Command(goto=...), including
+        # Command(goto=END) to finish.
+        return graph.compile()
+
+
+    def run(app, workflow_state, label=None, print_steps=True):
+        """Run the graph to completion, printing new findings as they appear.
+
+        Returns the final state. Uses stream mode "values" so the demo shows the
+        sequence of steps and iterations performed by the multi-agent workflow.
+        """
+        label = label or workflow_state.get("service_name", "workflow")
+        config = {"recursion_limit": 20 + 10 * (
+            workflow_state.get("max_iterations", state.DEFAULT_MAX_ITERATIONS)
+            + workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS))}
+        final = None
+        seen = 0
+        for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
+            final = snapshot
+            findings = snapshot.get("findings") or []
+            if print_steps:
+                for line in findings[seen:]:
+                    print(f"  [{label}] {line}", flush=True)
+            seen = len(findings)
+        return final
+
+
+    def _fake_window(anomaly_flag):
+        """Window snapshot used by the self-check scenarios."""
+
+        def window(service, seconds, since=None):
+            if anomaly_flag["anomalous"]:
+                return {
+                    "ever_seen": True,
+                    "last_seen_seconds_ago": 3.0,
+                    "metrics": {"service.uptime": 187.0, "dummy-crash": 1},
+                    "metric_events": [
+                        {"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}
+                    ],
+                    "logs": [{"severity_number": 17, "severity_text": "ERROR",
+                              "body": "service app simulated a dummy crash"}],
+                    "traces": [{"name": "dummy-crash", "status_code": 2,
+                                "status_message": "dummy crash"}],
+                }
+            return {
+                "ever_seen": True,
+                "last_seen_seconds_ago": 1.0,
+                "metrics": {"service.uptime": 2.0},
+                "metric_events": [],
+                "logs": [],
+                "traces": [],
+            }
+
+        return window
+
+
+    def self_check():
+        import mock_mcp_server
+
+        mock_mcp_server.reset()
+
+        # Scenario A: anomaly -> RCA inner loop -> approved remediation ->
+        # outer-loop verification sees healthy telemetry -> REMEDIATED.
+        anomaly_flag = {"anomalous": True}
+        linux = mcp_client.FakeMcpClient(mock_mcp_server.linux_tools(), mock_mcp_server.linux_call)
+        ansible = mcp_client.FakeMcpClient(mock_mcp_server.ansible_tools(), mock_mcp_server.ansible_call)
+
+        def get_window(service, seconds, since=None):
+            # The mock ansible server flips to "restarted" once the executor runs,
+            # which is when the service becomes healthy again.
+            if mock_mcp_server.service_restarted():
+                anomaly_flag["anomalous"] = False
+            return _fake_window(anomaly_flag)(service, seconds, since)
+
+        app = build_graph(
+            linux_mcp=linux,
+            ansible_mcp=ansible,
+            get_window=get_window,
+            use_llm=False,
+            verify_wait_seconds=0,
+        )
+        telemetry = _fake_window(anomaly_flag)("vm-1", 120)
+        final = run(app, state.initial_state("vm-1", telemetry=telemetry), print_steps=False)
+        if final.get("status") != state.STATUS_REMEDIATED:
+            raise SystemExit(f"graph: scenario A expected REMEDIATED, got {final.get('status')}\n"
+                             f"{final.get('findings')}")
+        if final.get("attempts") != 1:
+            raise SystemExit(f"graph: scenario A attempts={final.get('attempts')}")
+        if len(final.get("investigation", [])) < 2:
+            raise SystemExit("graph: scenario A inner loop did not iterate")
+        if not final.get("remediation_result", {}).get("ok"):
+            raise SystemExit("graph: scenario A remediation did not succeed")
+        if not final.get("root_cause", {}).get("found"):
+            raise SystemExit("graph: scenario A root cause missing")
+
+        # Scenario B: the service never recovers -> retries the full outer loop
+        # until max_attempts, then reports FAILED.
+        linux2 = mcp_client.FakeMcpClient(mock_mcp_server.linux_tools(), mock_mcp_server.linux_call)
+        ansible2 = mcp_client.FakeMcpClient(mock_mcp_server.ansible_tools(), mock_mcp_server.ansible_call)
+        stuck = {"anomalous": True}
+        app = build_graph(
+            linux_mcp=linux2,
+            ansible_mcp=ansible2,
+            get_window=_fake_window(stuck),
+            use_llm=False,
+            verify_wait_seconds=0,
+        )
+        final = run(
+            app,
+            state.initial_state("vm-1", telemetry=_fake_window(stuck)("vm-1", 120), max_attempts=2),
+            print_steps=False,
+        )
+        if final.get("status") != state.STATUS_FAILED:
+            raise SystemExit(f"graph: scenario B expected FAILED, got {final.get('status')}")
+        if final.get("attempts") != 2:
+            raise SystemExit(f"graph: scenario B attempts={final.get('attempts')}")
+
+        # Scenario C: healthy service -> immediate END with status healthy.
+        app = build_graph(use_llm=False)
+        healthy = {"ever_seen": True, "last_seen_seconds_ago": 1.0,
+                   "metrics": {}, "logs": [], "traces": []}
+        final = run(app, state.initial_state("vm-1", telemetry=healthy), print_steps=False)
+        if final.get("status") != state.STATUS_HEALTHY:
+            raise SystemExit(f"graph: scenario C expected HEALTHY, got {final.get('status')}")
+        print("graph: self-check ok", flush=True)
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="LangGraph multi-agent workflow graph")
+        parser.add_argument("--self-check", action="store_true")
+        args = parser.parse_args()
+        if not args.self_check:
+            raise SystemExit("pass --self-check; run workflow.py to execute the graph")
+        self_check()
+
+
+    if __name__ == "__main__":
+        main()
+  workflow.py: |
+    #!/usr/bin/env python3
+    """Run the LangGraph multi-agent ITOps workflow for autonomous remediation.
+
+    Pipeline (one graph run per anomalous service):
+
+      1. collector.py receives OTLP/HTTP metrics, logs and traces (:4318).
+      2. agent 1 anomaly_detector examines a time window of that telemetry.
+      3. agent 2 root_cause_analyzer iterates through MCP tools (inner loop).
+      4. agent 3 remediation_selector assembles approved steps from the
+         Ansible MCP server; the executor runs them and the anomaly detector
+         verifies the result (outer loop).
+
+    Modes:
+
+        python3 3_langgraph_workflow/workflow.py --self-check
+            verify every module offline (no cluster, no LLM, no MCP servers)
+
+        python3 3_langgraph_workflow/workflow.py --demo
+            offline end-to-end run with mock MCP servers and synthetic telemetry
+
+        python3 3_langgraph_workflow/workflow.py --run-once [--service NAME]
+            collect live telemetry, wait for an anomaly, run the workflow once
+
+        python3 3_langgraph_workflow/workflow.py
+            collector + poller + dashboard on :4318 (the deployed mode)
+
+    Environment:
+
+        LLM_BASE_URL, LLM_API_KEY, LLM_MODEL        OpenAI-compatible endpoint
+        LINUX_MCP_URL / LINUX_MCP_COMMAND           RCA MCP server (linux-mcp)
+        ANSIBLE_MCP_URL / ANSIBLE_MCP_COMMAND       remediation MCP server
+        MCP_INSECURE_TLS=1                          skip TLS verification
+    """
+
+    import argparse
+    import html
+    import json
+    import os
+    import threading
+    import time
+    from http.server import ThreadingHTTPServer
+
+    import anomaly_detector
+    import collector
+    import graph
+    import llm
+    import mcp_client
+    import mock_mcp_server
+    import remediation_selector
+    import root_cause_analyzer
+    import state
+
+    STEP = "aiops workflow"
+
+
+    def build_deps(args, store=None):
+        """Build the graph with real clients from the environment (or overrides)."""
+        insecure = getattr(args, "insecure_tls", False)
+
+        def client_for(prefix, url_flag, command_flag):
+            url = (url_flag or "").strip() or None
+            command = (command_flag or "").strip() or None
+            if url or command:
+                return mcp_client.from_config(url=url, command=command, insecure=insecure)
+            return mcp_client.from_env(prefix, insecure=insecure)
+
+        linux = client_for("LINUX", getattr(args, "linux_mcp_url", None), getattr(args, "linux_mcp_command", None))
+        ansible = client_for("ANSIBLE", getattr(args, "ansible_mcp_url", None), getattr(args, "ansible_mcp_command", None))
+
+        get_window = None
+        if store is not None:
+            def get_window(service, seconds, since=None):
+                return store.window(service, seconds, since=since)
+
+        app = graph.build_graph(
+            linux_mcp=linux,
+            ansible_mcp=ansible,
+            get_window=get_window,
+            use_llm=True,
+            silence_seconds=args.silence_seconds,
+            verify_wait_seconds=args.verify_wait_seconds,
+        )
+        return app, linux, ansible
+
+
+    def close_clients(*clients):
+        for client in clients:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001 - shutdown is best effort
+                    pass
+
+
+    def run_offline_demo():
+        """Full pipeline with in-process mock MCP servers and synthetic telemetry."""
+        print("OFFLINE DEMO: mock MCP servers, synthetic telemetry, no LLM required", flush=True)
+        mock_mcp_server.reset()
+        linux = mcp_client.FakeMcpClient(mock_mcp_server.linux_tools(), mock_mcp_server.linux_call)
+        ansible = mcp_client.FakeMcpClient(mock_mcp_server.ansible_tools(), mock_mcp_server.ansible_call)
+        anomaly_flag = {"anomalous": True}
+
+        def get_window(service, seconds, since=None):
+            if mock_mcp_server.service_restarted():
+                anomaly_flag["anomalous"] = False
+            if anomaly_flag["anomalous"]:
+                return {
+                    "ever_seen": True,
+                    "last_seen_seconds_ago": 3.0,
+                    "metrics": {"service.uptime": 187.4, "service.cpu.load": 6.2,
+                                "service.memory.load": 31.0, "dummy-crash": 1},
+                    "metric_events": [
+                        {"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}
+                    ],
+                    "logs": [{"severity_number": 17, "severity_text": "ERROR",
+                              "body": "service app simulated a dummy crash"}],
+                    "traces": [{"name": "dummy-crash", "status_code": 2,
+                                "status_message": "dummy crash"}],
+                }
+            return {
+                "ever_seen": True,
+                "last_seen_seconds_ago": 1.0,
+                "metrics": {"service.uptime": 2.0, "service.cpu.load": 4.0},
+                "metric_events": [],
+                "logs": [],
+                "traces": [],
+            }
+
+        app = graph.build_graph(
+            linux_mcp=linux,
+            ansible_mcp=ansible,
+            get_window=get_window,
+            use_llm=False,
+            verify_wait_seconds=0,
+        )
+        service_name = "rhel10-service-1"
+        print(f"{STEP}: anomaly injected into the telemetry window for {service_name}", flush=True)
+        final = graph.run(app, state.initial_state(
+            service_name,
+            telemetry=get_window(service_name, 120),
+            max_iterations=5,
+            max_attempts=3,
+        ), label=service_name)
+        print(f"{STEP}: final status: {final.get('status')}", flush=True)
+        root_cause = final.get("root_cause", {})
+        print(f"{STEP}: root cause: {root_cause.get('summary', 'n/a')}", flush=True)
+        print(f"{STEP}: attempts: {final.get('attempts')}  "
+              f"investigation steps: {len(final.get('investigation', []))}  "
+              f"findings: {len(final.get('findings', []))}", flush=True)
+        return final
+
+
+    class WorkflowHandler(collector.CollectorHandler):
+        """Collector endpoints plus the multi-agent workflow dashboard."""
+
+        runs = {}  # service_name -> latest final state (or {"running": True})
+        runs_lock = threading.Lock()
+
+        def do_GET(self):
+            from urllib.parse import parse_qs, urlparse
+
+            parsed_url = urlparse(self.path)
+            if parsed_url.path == "/runs":
+                with self.runs_lock:
+                    payload = dict(self.runs)
+                body = json.dumps(payload, indent=2, default=str).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed_url.path in ("/", "/dashboard"):
+                page = render_workflow_dashboard(self.store, self.runs, self.runs_lock).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
+            super().do_GET()
+
+
+    def render_workflow_dashboard(store, runs, runs_lock):
+        with runs_lock:
+            runs_snapshot = dict(runs)
+        rows = []
+        for service_name in sorted(store.services() or runs_snapshot):
+            run = runs_snapshot.get(service_name)
+            if run is None:
+                status, detail = "no run yet", "waiting for an anomaly"
+            elif run.get("running"):
+                status, detail = "running", "multi-agent workflow in progress"
+            else:
+                status = run.get("status", "?")
+                anomaly = run.get("anomaly", {})
+                root_cause = run.get("root_cause", {})
+                detail = root_cause.get("summary") or anomaly.get("summary") or ""
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(service_name)}</td>"
+                f"<td>{html.escape(str(status))}</td>"
+                f"<td>{html.escape(str(detail)[:300])}</td>"
+                "</tr>"
+            )
+        body = ("\n".join(rows)) or "<tr><td colspan=\"3\">No telemetry yet.</td></tr>"
+        findings_rows = []
+        for service_name in sorted(runs_snapshot):
+            run = runs_snapshot[service_name]
+            if not run or run.get("running"):
+                continue
+            for line in run.get("findings", [])[-12:]:
+                findings_rows.append(
+                    f"<tr><td>{html.escape(service_name)}</td><td>{html.escape(line)}</td></tr>"
+                )
+        findings_body = ("\n".join(findings_rows)) or "<tr><td colspan=\"2\">No agent findings yet.</td></tr>"
+        return f"""<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta http-equiv="refresh" content="5">
+      <title>AIOps multi-agent workflow</title>
+      <style>
+        body {{ font-family: "Segoe UI", Helvetica, Arial, sans-serif; margin: 2rem; background: #f4f6f8; color: #1f2933; }}
+        main {{ max-width: 72rem; }}
+        table {{ width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 2rem; }}
+        th, td {{ border: 1px solid #e2e8f0; padding: 0.6rem 0.8rem; text-align: left; vertical-align: top; }}
+        th {{ background: #eef2f6; }}
+        td:nth-child(2) {{ white-space: nowrap; }}
+      </style>
+    </head>
+    <body>
+      <main>
+        <h1>AIOps multi-agent workflow</h1>
+        <p>collector: {len(store.services())} services &middot; llm: {"on" if llm.available() else "off (heuristic fallback)"}</p>
+        <table>
+          <thead><tr><th>Service</th><th>Status</th><th>Detail</th></tr></thead>
+          <tbody>{body}</tbody>
+        </table>
+        <h2>Agent findings (latest run, newest last)</h2>
+        <table>
+          <thead><tr><th>Service</th><th>Finding</th></tr></thead>
+          <tbody>{findings_body}</tbody>
+        </table>
+      </main>
+    </body>
+    </html>
+    """
+
+
+    def serve_forever(args):
+        """Deployed mode: collector + poller + dashboard on one port."""
+        store = collector.TelemetryStore()
+        WorkflowHandler.store = store
+        server = ThreadingHTTPServer((args.host, args.port), WorkflowHandler)
+        threading.Thread(target=server.serve_forever, daemon=True, name="http").start()
+        print(
+            f"{STEP}: collector listening on {args.host}:{args.port} "
+            f"(OTLP metrics/logs/traces + dashboard at /)",
+            flush=True,
+        )
+
+        running = set()
+        finished_at = {}
+
+        def run_for_service(service_name):
+            with WorkflowHandler.runs_lock:
+                WorkflowHandler.runs[service_name] = {"running": True}
+            try:
+                app, linux, ansible = build_deps(args, store=store)
+                telemetry = store.window(service_name, args.window_seconds)
+                workflow_state = state.initial_state(
+                    service_name,
+                    window_seconds=args.window_seconds,
+                    telemetry=telemetry,
+                    max_iterations=args.max_iterations,
+                    max_attempts=args.max_attempts,
+                )
+                final = graph.run(app, workflow_state, label=service_name)
+                with WorkflowHandler.runs_lock:
+                    WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
+                close_clients(linux, ansible)
+            except Exception as exc:  # noqa: BLE001 - a failed run must not kill the poller
+                print(f"{STEP}: run for {service_name} failed: {exc}", flush=True)
+                with WorkflowHandler.runs_lock:
+                    WorkflowHandler.runs[service_name] = {"running": False, "status": "error", "error": str(exc)}
+            finally:
+                running.discard(service_name)
+                finished_at[service_name] = time.monotonic()
+
+        print(f"{STEP}: poller started (window={args.window_seconds}s silence={args.silence_seconds}s "
+              f"cooldown={args.cooldown_seconds}s)", flush=True)
+        try:
+            while True:
+                time.sleep(args.poll_seconds)
+                for service_name in store.services():
+                    if service_name in running:
+                        continue
+                    if time.monotonic() - finished_at.get(service_name, 0) < args.cooldown_seconds:
+                        continue
+                    window = store.window(service_name, args.window_seconds)
+                    quick = anomaly_detector.analyze_window(window, args.silence_seconds)
+                    if quick["detected"]:
+                        print(f"{STEP}: anomaly detected for {service_name} "
+                              f"({','.join(quick['signals'])}); starting workflow run", flush=True)
+                        running.add(service_name)
+                        threading.Thread(
+                            target=run_for_service, args=(service_name,), daemon=True,
+                            name=f"run-{service_name}",
+                        ).start()
+        except KeyboardInterrupt:
+            print(f"{STEP}: stopped", flush=True)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+    def run_once(args):
+        """Collect live telemetry, wait for an anomaly, run the workflow once."""
+        store = collector.TelemetryStore()
+        WorkflowHandler.store = store
+        server = ThreadingHTTPServer((args.host, args.port), WorkflowHandler)
+        threading.Thread(target=server.serve_forever, daemon=True, name="http").start()
+        print(f"{STEP}: collecting telemetry on {args.host}:{args.port}; waiting for an anomaly "
+              f"(timeout {args.wait_seconds}s)", flush=True)
+        try:
+            deadline = time.monotonic() + args.wait_seconds
+            target = None
+            while time.monotonic() < deadline:
+                time.sleep(args.poll_seconds)
+                names = [args.service] if args.service else store.services()
+                for service_name in names:
+                    if not store.window(service_name, 1)["ever_seen"]:
+                        continue
+                    window = store.window(service_name, args.window_seconds)
+                    quick = anomaly_detector.analyze_window(window, args.silence_seconds)
+                    if quick["detected"]:
+                        target = service_name
+                        print(f"{STEP}: anomaly detected for {service_name}: {quick['summary']}", flush=True)
+                        break
+                if target:
+                    break
+            if target is None:
+                print(f"{STEP}: no anomaly within {args.wait_seconds}s", flush=True)
+                return None
+            # The collector keeps running: the executor verifies the remediation
+            # against telemetry that arrives after it, so the service must still
+            # be able to push while the graph executes.
+            app, linux, ansible = build_deps(args, store=store)
+            try:
+                telemetry = store.window(target, args.window_seconds)
+                final = graph.run(app, state.initial_state(
+                    target,
+                    window_seconds=args.window_seconds,
+                    telemetry=telemetry,
+                    max_iterations=args.max_iterations,
+                    max_attempts=args.max_attempts,
+                ), label=target)
+                print(f"{STEP}: final status: {(final or {}).get('status')}", flush=True)
+                return final
+            finally:
+                close_clients(linux, ansible)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+    def self_check():
+        for module in (state, llm, mock_mcp_server, mcp_client, collector, anomaly_detector,
+                       root_cause_analyzer, remediation_selector, graph):
+            module.self_check()
+        final = run_offline_demo()
+        if final.get("status") != state.STATUS_REMEDIATED:
+            raise SystemExit(f"{STEP}: offline demo should end REMEDIATED, got {final.get('status')}")
+        print(f"{STEP}: self-check ok", flush=True)
+
+
+    def _env_int(name, fallback):
+        try:
+            return int(os.environ.get(name, "") or fallback)
+        except ValueError:
+            return fallback
+
+
+    def _env_float(name, fallback):
+        try:
+            return float(os.environ.get(name, "") or fallback)
+        except ValueError:
+            return fallback
+
+
+    def main():
+        parser = argparse.ArgumentParser(description="Multi-agent AIOps workflow (LangGraph)")
+        parser.add_argument("--self-check", action="store_true")
+        parser.add_argument("--demo", action="store_true", help="offline end-to-end demo with mock MCP servers")
+        parser.add_argument("--run-once", action="store_true", help="wait for one anomaly, run once, exit")
+        parser.add_argument("--service", default="", help="limit to one service name")
+        parser.add_argument("--host", default=collector.LISTEN_HOST)
+        parser.add_argument("--port", type=int, default=collector.LISTEN_PORT)
+        parser.add_argument("--window-seconds", type=int,
+                            default=_env_int("WINDOW_SECONDS", state.DEFAULT_WINDOW_SECONDS))
+        parser.add_argument("--silence-seconds", type=float,
+                            default=_env_float("SILENCE_SECONDS", state.DEFAULT_SILENCE_SECONDS))
+        parser.add_argument("--poll-seconds", type=float,
+                            default=_env_float("POLL_SECONDS", state.DEFAULT_POLL_SECONDS))
+        parser.add_argument("--cooldown-seconds", type=float,
+                            default=_env_float("COOLDOWN_SECONDS", state.DEFAULT_COOLDOWN_SECONDS))
+        parser.add_argument("--verify-wait-seconds", type=float,
+                            default=_env_float("VERIFY_WAIT_SECONDS", state.DEFAULT_VERIFY_WAIT_SECONDS))
+        parser.add_argument("--wait-seconds", type=float, default=300, help="--run-once anomaly timeout")
+        parser.add_argument("--max-iterations", type=int,
+                            default=_env_int("MAX_ITERATIONS", state.DEFAULT_MAX_ITERATIONS))
+        parser.add_argument("--max-attempts", type=int,
+                            default=_env_int("MAX_ATTEMPTS", state.DEFAULT_MAX_ATTEMPTS))
+        parser.add_argument("--linux-mcp-url", default="", help="override LINUX_MCP_URL")
+        parser.add_argument("--linux-mcp-command", default="", help="override LINUX_MCP_COMMAND")
+        parser.add_argument("--ansible-mcp-url", default="", help="override ANSIBLE_MCP_URL")
+        parser.add_argument("--ansible-mcp-command", default="", help="override ANSIBLE_MCP_COMMAND")
+        parser.add_argument("--insecure-tls", action="store_true", help="skip MCP TLS verification")
+        args = parser.parse_args()
+
+        if args.self_check:
+            self_check()
+            return
+        if args.demo:
+            run_offline_demo()
+            return
+        if args.run_once:
+            run_once(args)
+            return
+        serve_forever(args)
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiops-workflow
+  namespace: my-vm-project
+spec:
+  selector:
+    app: aiops-workflow
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: aiops-workflow
+  namespace: my-vm-project
+spec:
+  to:
+    kind: Service
+    name: aiops-workflow
+  port:
+    targetPort: otlp-http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aiops-workflow
+  namespace: my-vm-project
+  labels:
+    app: aiops-workflow
+spec:
+  restartPolicy: Always
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: workflow
+      image: registry.redhat.io/ubi9/python-312:latest
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -euo pipefail
+          pip install --no-cache-dir --target /tmp/pydeps 'langgraph>=1.0' 'opentelemetry-proto==1.41.1'
+          export PYTHONPATH=/tmp/pydeps
+          exec python3 /opt/workflow/workflow.py
+      env:
+        - name: HOME
+          value: /tmp
+        - name: LLM_BASE_URL
+          value: ""
+        - name: LLM_MODEL
+          value: ""
+        - name: LLM_API_KEY
+          value: ""
+        - name: LINUX_MCP_URL
+          value: http://linux-mcp.my-vm-project.svc.cluster.local:8000/mcp
+        - name: ANSIBLE_MCP_URL
+          value: ""
+        - name: MCP_INSECURE_TLS
+          value: "1"
+        - name: WINDOW_SECONDS
+          value: "120"
+        - name: SILENCE_SECONDS
+          value: "10"
+      ports:
+        - name: otlp-http
+          containerPort: 4318
+      volumeMounts:
+        - name: code
+          mountPath: /opt/workflow
+  volumes:
+    - name: code
+      configMap:
+        name: aiops-workflow
+        items:
+          - key: state.py
+            path: state.py
+          - key: llm.py
+            path: llm.py
+          - key: mcp_client.py
+            path: mcp_client.py
+          - key: mock_mcp_server.py
+            path: mock_mcp_server.py
+          - key: collector.py
+            path: collector.py
+          - key: anomaly_detector.py
+            path: anomaly_detector.py
+          - key: root_cause_analyzer.py
+            path: root_cause_analyzer.py
+          - key: remediation_selector.py
+            path: remediation_selector.py
+          - key: graph.py
+            path: graph.py
+          - key: workflow.py
+            path: workflow.py

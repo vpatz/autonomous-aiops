@@ -15,6 +15,7 @@ stringData:
     groups: wheel
     ssh_authorized_keys:
       - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDI4Ub3zmO1i1KR/BeMLOhbr0pZCraa3jjPMi0Gi2QFl+/NN8s0PRKwIuhT45OVwzt7ES75NbZn6o5mfUYttvLNVWKwTKI7nEfcLXMHZkvf3pKfFDiGIdb46J4/Fafc6K7IZ/8tI+oX5lSL6W19Gay04gZZ/I6fbW3k02ZAjMbLdblZkIIjGH1c+k4XnjQXz5WjiS1yqMMgS8BUzcSzS4xoU97PZreaTPyiM6TJ1na3hxtomiribPF0smbYdlPdC1zohVOHV5s82UngtE1c+yhLksUaXP8UVvsIyrJLabiwDT4D5nKudQHADK2MSoT0XYI1HSGUp4wMt5qr0O3NQlFzm6IzvobzUBX4GOca03RpyReYIOUux2jdUEKzYgnK4b4IfD3oDHIbr2/kaBIUK9nhpAjV1SNw0pdu43yD0T13wN3L3Zj8NS0yzB57sOX0R1xUcsX3HAT3Npz8eoYY290kjd4NeeafDW8C1YSGZZf885jOcEBY3ODJguCogoezJXE= vpathang@vpathang-mac
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJbh1BTqkYHRbTBeJs/cBV7wfXAYdl2FH2YsWeuEAJFg mcp@rhel
     write_files:
       - path: /etc/yum.repos.d/ubi10.repo
         owner: root:root
@@ -73,7 +74,7 @@ stringData:
           [Service]
           Type=simple
           WorkingDirectory=/opt/aiops
-          Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://aiops-agent.my-vm-project.svc.cluster.local:4318
+          Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://aiops-workflow.my-vm-project.svc.cluster.local:4318
           Environment=OTEL_SERVICE_NAME=%H
           ExecStart=/opt/aiops/start-service.sh
           Restart=no
@@ -306,3 +307,205 @@ spec:
             requests:
               storage: 40Gi
           storageClassName: ocs-external-storagecluster-ceph-rbd
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: linux-mcp-ssh
+  namespace: my-vm-project
+type: Opaque
+stringData:
+  id_ed25519: |
+    REDACTED-PRIVATE-KEY
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linux-mcp-policy
+  namespace: my-vm-project
+data:
+  policy.yaml: |
+    rules:
+      - all_users: true
+        host: "*"
+        tools: ["@fixed"]
+        action: ssh_key
+        ssh_key:
+          path: /tmp/id_ed25519
+          user: rheluser
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linux-mcp
+  namespace: my-vm-project
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linux-mcp
+  template:
+    metadata:
+      labels:
+        app: linux-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: linux-mcp-server
+          image: quay.io/redhat-services-prod/rhel-lightspeed-tenant/linux-mcp-server:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              cp /etc/linux-mcp-server/secret/id_ed25519 /tmp/id_ed25519
+              chmod 600 /tmp/id_ed25519
+              exec linux-mcp-server
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: HOME
+              value: /tmp
+            - name: LINUX_MCP_TRANSPORT
+              value: http
+            - name: LINUX_MCP_HOST
+              value: 0.0.0.0
+            - name: LINUX_MCP_PORT
+              value: "8000"
+            - name: LINUX_MCP_PATH
+              value: /mcp
+            - name: LINUX_MCP_HOST_MODE
+              value: remote-only
+            - name: LINUX_MCP_USER
+              value: rheluser
+            - name: LINUX_MCP_SSH_KEY_PATH
+              value: /tmp/id_ed25519
+            - name: LINUX_MCP_VERIFY_HOST_KEYS
+              value: "false"
+            - name: LINUX_MCP_LOG_OUTPUT
+              value: stdout
+            - name: LINUX_MCP_LOG_FORMAT
+              value: json
+            - name: LINUX_MCP_POLICY_PATH
+              value: /etc/linux-mcp-server/policy.yaml
+            - name: LINUX_MCP_ALLOWED_LOG_PATHS
+              value: /var/log/messages,/var/log/secure
+            - name: LINUX_MCP_BASE_URL
+              value: https://linux-mcp-my-vm-project.apps.cluster-ptrsb.dyn.redhatworkshops.io
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /etc/linux-mcp-server/secret
+              readOnly: true
+            - name: policy
+              mountPath: /etc/linux-mcp-server/policy.yaml
+              subPath: policy.yaml
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: ssh-key
+          secret:
+            secretName: linux-mcp-ssh
+            defaultMode: 0444
+        - name: policy
+          configMap:
+            name: linux-mcp-policy
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linux-mcp
+  namespace: my-vm-project
+spec:
+  selector:
+    app: linux-mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: linux-mcp
+  namespace: my-vm-project
+spec:
+  host: linux-mcp-my-vm-project.apps.cluster-ptrsb.dyn.redhatworkshops.io
+  to:
+    kind: Service
+    name: linux-mcp
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhel10-service-1
+  namespace: my-vm-project
+spec:
+  selector:
+    kubevirt.io/domain: rhel10-service-1
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhel10-service-2
+  namespace: my-vm-project
+spec:
+  selector:
+    kubevirt.io/domain: rhel10-service-2
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhel10-service-3
+  namespace: my-vm-project
+spec:
+  selector:
+    kubevirt.io/domain: rhel10-service-3
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhel10-service-4
+  namespace: my-vm-project
+spec:
+  selector:
+    kubevirt.io/domain: rhel10-service-4
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22

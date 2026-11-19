@@ -1,34 +1,88 @@
 # autonomous-aiops
-Agent remediations for unknown scenarios
 
-## Steps
+A multi-agent ITOps workflow for Autonomous Remediation from Unknown
+Scenarios.
 
-### Infra setup -- OpenShift Virtualization, GPU node running LLM or EnMaaS
+In production deployments running mission critical applications, it is
+necessary to predict anomalies, their root causes and apply remediation to
+ensure smooth running of IT infrastructure. This repo demonstrates a
+multi-agent workflow that remediates error states in a multi-node
+distributed system:
 
-1. Create set of VMs --> ```vm-deploy.yaml```
-2. In each VM, deploy service with OTel publishers and service. --> ```service.py```, quay image
-3. Create cluster and deploy autonomous agent script --> ```autonomous-agent.py```, quay image
-4. Deploy LLM with end-point --> ```llm-deploy.yaml```
-   
+- OpenTelemetry sends **metrics, logs and traces** from services running in
+  RHEL VMs (OpenShift Virtualization) to a telemetry collector.
+- Time windows of that telemetry are examined by the **anomaly detector
+  agent**, which triggers the **root cause analysis agent**.
+- The RCA agent autonomously iterates to dig deeper through **MCP servers**
+  (inner loop): the linux-mcp server runs commands and reads files on the
+  affected VM (`systemctl status`, `journalctl`, ...).
+- The **remediation selector agent** uses the root cause to assemble the
+  required steps from the **approved commands** advertised by the Ansible
+  MCP server (outer loop remediation).
+- The executor runs the approved plan and the anomaly detector verifies the
+  post-remediation telemetry, closing the outer loop.
 
-### Service
+The workflow is implemented as a LangGraph `StateGraph`; every iteration of
+every agent is kept in an append-only audit trail that drives the demo
+dashboard.
 
-5. Service will generate metrics, log, traces and publish using Open Telemetry --> part of ```service.py```
+```
+                         OTLP/HTTP (metrics, logs, traces)
+   1_vm_services ─────────────────────────────────────────────► 3_langgraph_workflow
+                                                                  collector (:4318)
+                                                                  anomaly_detector (agent 1)
+                                                                    │ anomaly
+                                                                    ▼
+                                                        root_cause_analyzer (agent 2)
+                                                        inner loop ──► linux-mcp
+                                                                    │ root cause
+                                                                    ▼
+                                                        remediation_selector (agent 3)
+                                                                    │ approved plan
+                                                                    ▼
+                                                        remediation_executor ──► Ansible MCP
+                                                                    │
+                                                        outer loop: verify ──► agent 1
+```
 
+## Quick demo (offline, no cluster needed)
 
-### Error conditions
+```sh
+python3 3_langgraph_workflow/workflow.py --demo
+python3 3_langgraph_workflow/workflow.py --self-check
+```
 
-6. Error-1: Service will autocrash randomly between 5 to 30 secs --> part of ```service.py```
-7. Error-2: Randomly select a VM and restart --> ```error-2.py```
+`--demo` prints the full sequence of steps and iterations: anomaly
+detection, two MCP-backed investigation iterations, the root cause, the
+approved remediation plan, its execution, and the verification pass.
 
+See [3_langgraph_workflow/README.md](3_langgraph_workflow/README.md) for
+local end-to-end runs with real telemetry, configuration (LLM, MCP
+servers), and the deployed mode.
 
-### Agent 
+## Infra setup (OpenShift Virtualization)
 
-8. Agent will subscribe to OpenTelemetry messages from service --> part of ```autonomous-agent.py```
-9. Agent will use LLM for root cause analysis
-10. Agent will use LLM for creating the remediation playbook --> ```remediate.yaml```
-11. Agent will push remediation playbook to git and call EDA event 
+1. Deploy the VMs and the linux-mcp server:
+   `oc apply -f 1_vm_services/vm-deploy.yaml`
+   (4 RHEL 10 VMs; each boots, clones this repo and runs
+   `1_vm_services/service.py` as `aiops-demo.service`, pushing telemetry to
+   `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`)
+2. Deploy the multi-agent workflow:
+   `oc apply -f 3_langgraph_workflow/workflow-pod.yaml`
+   (collector + agents + dashboard on :4318; talks to linux-mcp in-cluster)
+3. Point the workflow at an LLM endpoint (optional) and an Ansible MCP
+   server (required for real remediation) via the pod environment:
+   `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`, `ANSIBLE_MCP_URL`.
+4. The service in each VM emits a `dummy-crash` fault (metric + ERROR log +
+   failed span) at a random time (set `DUMMY_CRASH_MAX_DELAY_SECONDS` to
+   control it). The workflow detects, investigates, remediates and verifies
+   it; watch the dashboard at the `aiops-workflow` route.
 
-### AAP
+## Repository layout
 
-12. EDA will pull ```remediate.yaml``` from git and update VM to restart service in a running VM or start correct VM and service
+| Directory | Contents |
+| --- | --- |
+| `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
+| `2_aiops_agent/` | earlier single-loop demo: silence detection -> EDA restart event |
+| `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
+| `UnUsed/` | decommissioned manifests |

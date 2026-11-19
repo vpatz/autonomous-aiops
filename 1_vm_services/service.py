@@ -3,13 +3,17 @@
 GET /        page with a timer that starts when the page loads
 GET /health  whether this process is serving requests
 
-Metrics are pushed over OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT
-(default http://192.168.64.1:4318) every OTEL_METRIC_EXPORT_INTERVAL ms.
-Host CPU and memory load are service.cpu.load and service.memory.load.
-A random time within 5 minutes of start sends a dummy-crash metric instead of exiting.
+Metrics, logs and traces are pushed over OTLP/HTTP to
+OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
+OTEL_METRIC_EXPORT_INTERVAL ms. Host CPU and memory load are
+service.cpu.load and service.memory.load.
+A random time within DUMMY_CRASH_MAX_DELAY_SECONDS (default 300) of start
+sends a dummy-crash metric, an ERROR log record and a failed span instead of
+exiting: the multi-agent workflow detects the fault state and remediates it.
 """
 
 import atexit
+import logging
 import os
 import random
 import socket
@@ -19,28 +23,61 @@ import time
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template_string, request
-from opentelemetry import metrics
+from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 from opentelemetry.metrics import Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+try:  # OTel Python 1.x uses underscore module names for logs
+    from opentelemetry._logs import set_logger_provider
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    from opentelemetry.sdk._logs import LoggingHandler, LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+except ImportError:  # future renames
+    from opentelemetry.logs import set_logger_provider
+    from opentelemetry.exporter.otlp.proto.http.log_exporter import OTLPLogExporter
+    from opentelemetry.sdk.logs import LoggingHandler, LoggerProvider
+    from opentelemetry.sdk.logs.export import BatchLogRecordProcessor
 
 os.environ.setdefault("OTEL_SERVICE_NAME", "aiops-service-app")
 os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://192.168.64.1:4318")
 os.environ.setdefault("OTEL_METRIC_EXPORT_INTERVAL", "5000")
 
+DUMMY_CRASH_MAX_DELAY = float(os.environ.get("DUMMY_CRASH_MAX_DELAY_SECONDS", "300"))
+
 app = Flask(__name__)
 STARTED_AT = time.time()
 
+_resource = Resource.create({"service.name": os.environ["OTEL_SERVICE_NAME"]})
 
 _provider = MeterProvider(
-    resource=Resource.create({"service.name": os.environ["OTEL_SERVICE_NAME"]}),
+    resource=_resource,
     metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter())],
 )
 metrics.set_meter_provider(_provider)
 atexit.register(_provider.shutdown)
+
+_tracer_provider = TracerProvider(resource=_resource)
+_tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(_tracer_provider)
+atexit.register(_tracer_provider.shutdown)
+_tracer = trace.get_tracer("aiops.service.app")
+
+_logger_provider = LoggerProvider(resource=_resource)
+_logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
+set_logger_provider(_logger_provider)
+atexit.register(_logger_provider.shutdown)
+_logging_handler = LoggingHandler(level=logging.ERROR, logger_provider=_logger_provider)
+_logging_handler.setFormatter(logging.Formatter("%(message)s"))
+_log = logging.getLogger("aiops.service.app")
+_log.setLevel(logging.ERROR)
+_log.addHandler(_logging_handler)
 
 _meter = metrics.get_meter("aiops.service.app")
 page_loads = _meter.create_counter(
@@ -58,11 +95,19 @@ dummy_crash = _meter.create_counter(
 
 
 def _send_dummy_crash():
-    delay = random.uniform(0, 5 * 60)
+    delay = random.uniform(0, DUMMY_CRASH_MAX_DELAY)
     print(f"service app will send dummy-crash in {delay:.1f}s", file=sys.stderr, flush=True)
     time.sleep(delay)
     dummy_crash.add(1)
+    # The fault state is visible in all three telemetry signals: a metric,
+    # an ERROR log record, and a failed span. The process keeps running.
+    with _tracer.start_as_current_span("dummy-crash") as span:
+        span.set_status(trace.Status(trace.StatusCode.ERROR, "dummy crash"))
+        span.add_event("dummy-crash")
+        _log.error("service app simulated a dummy crash")
     _provider.force_flush()
+    _tracer_provider.force_flush()
+    _logger_provider.force_flush()
     print("service app sent dummy-crash event", file=sys.stderr, flush=True)
 
 

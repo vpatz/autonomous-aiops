@@ -1,0 +1,5 @@
+# Stage 3: LangGraph multi-agent workflow.
+# The LLM client and the MCP client are stdlib-only; only the graph
+# orchestration and the OTLP protobuf parsing need packages.
+langgraph>=1.0
+opentelemetry-proto==1.41.1
