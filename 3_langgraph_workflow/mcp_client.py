@@ -330,8 +330,9 @@ def main():
     )
     args = parser.parse_args()
     if args.probe:
+        insecure = os.environ.get("MCP_INSECURE_TLS", "").lower() in ("1", "true", "yes")
         if args.probe.startswith("http://") or args.probe.startswith("https://"):
-            client = from_config(url=args.probe)
+            client = from_config(url=args.probe, insecure=insecure)
         else:
             client = from_config(command=args.probe)
         print(f"server: {client.server_info}", flush=True)

@@ -26,12 +26,24 @@ import state
 
 STEP = "agent 2 root cause analyzer"
 SERVICE_UNIT = "aiops-demo.service"
-EXEC_TOOL_CANDIDATES = ("run_command", "execute_command", "exec", "shell", "command")
-FALLBACK_COMMANDS = (
-    f"systemctl status {SERVICE_UNIT}",
-    f"journalctl -u {SERVICE_UNIT} -n 50 --no-pager",
-)
 MAX_OUTPUT_CHARS = 400
+
+
+def _fallback_candidates(service_name):
+    """Investigation playbook: (tool, arguments) candidates tried in order
+    against whatever the MCP server actually advertises.
+
+    The first two match the real linux-mcp server toolset (get_service_status
+    / get_service_logs, which SSH to `host`); the run_command entries match
+    the offline mock server. `host` is the service name: the linux-mcp pod
+    resolves the per-VM Services in its own namespace.
+    """
+    return [
+        ("get_service_status", {"service_name": SERVICE_UNIT, "host": service_name}),
+        ("get_service_logs", {"service_name": SERVICE_UNIT, "host": service_name, "lines": 50}),
+        ("run_command", {"command": f"systemctl status {SERVICE_UNIT}"}),
+        ("run_command", {"command": f"journalctl -u {SERVICE_UNIT} -n 50 --no-pager"}),
+    ]
 
 
 def truncate(text, limit=MAX_OUTPUT_CHARS):
@@ -39,17 +51,17 @@ def truncate(text, limit=MAX_OUTPUT_CHARS):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def pick_exec_tool(tools, preferred=None):
-    """Choose the command-execution tool from an MCP tools/list result."""
+def _fallback_next_action(investigation, tools, iteration, service_name):
+    """Deterministic playbook when no LLM is configured."""
     names = [tool.get("name", "") for tool in tools]
-    for candidate in ([preferred] if preferred else []) + list(EXEC_TOOL_CANDIDATES):
-        if candidate in names:
-            return candidate
-    for name in names:
-        lowered = name.lower()
-        if "command" in lowered or "exec" in lowered or "shell" in lowered:
-            return name
-    return names[0] if names else None
+    available = [
+        candidate for candidate in _fallback_candidates(service_name)
+        if candidate[0] in names
+    ]
+    if iteration <= len(available):
+        tool, arguments = available[iteration - 1]
+        return {"action": "call_tool", "tool": tool, "arguments": dict(arguments)}
+    return {"action": "conclude", "root_cause": _conclude(investigation)}
 
 
 def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
@@ -79,15 +91,6 @@ def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
         f"Investigation so far: {json.dumps(history)[:2000] or 'none yet'}\n"
     )
     return llm.chat_json([{"role": "user", "content": prompt}])
-
-
-def _fallback_next_action(investigation, tools, iteration):
-    """Deterministic playbook when no LLM is configured."""
-    exec_tool = pick_exec_tool(tools)
-    if exec_tool and iteration <= len(FALLBACK_COMMANDS):
-        command = FALLBACK_COMMANDS[iteration - 1]
-        return {"action": "call_tool", "tool": exec_tool, "arguments": {"command": command}}
-    return {"action": "conclude", "root_cause": _conclude(investigation)}
 
 
 def _conclude(investigation):
@@ -166,14 +169,14 @@ def build_node(linux_mcp=None, use_llm=True):
                     "confidence": "low",
                 }}
             else:
-                decision = _fallback_next_action(investigation, tools, iteration)
+                decision = _fallback_next_action(investigation, tools, iteration, service_name)
 
         if decision.get("action") == "call_tool" and iteration <= max_iterations:
             tool = decision.get("tool") or ""
             arguments = decision.get("arguments") or {}
             if tool not in [item.get("name") for item in tools]:
                 # Unapproved or unknown tool: fall back to a known-good call.
-                fallback = _fallback_next_action(investigation, tools, iteration)
+                fallback = _fallback_next_action(investigation, tools, iteration, service_name)
                 if fallback.get("action") == "call_tool":
                     tool, arguments = fallback["tool"], fallback["arguments"]
                 else:
