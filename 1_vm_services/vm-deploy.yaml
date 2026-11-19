@@ -17,7 +17,7 @@ stringData:
     groups: wheel
     ssh_authorized_keys:
       - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDI4Ub3zmO1i1KR/BeMLOhbr0pZCraa3jjPMi0Gi2QFl+/NN8s0PRKwIuhT45OVwzt7ES75NbZn6o5mfUYttvLNVWKwTKI7nEfcLXMHZkvf3pKfFDiGIdb46J4/Fafc6K7IZ/8tI+oX5lSL6W19Gay04gZZ/I6fbW3k02ZAjMbLdblZkIIjGH1c+k4XnjQXz5WjiS1yqMMgS8BUzcSzS4xoU97PZreaTPyiM6TJ1na3hxtomiribPF0smbYdlPdC1zohVOHV5s82UngtE1c+yhLksUaXP8UVvsIyrJLabiwDT4D5nKudQHADK2MSoT0XYI1HSGUp4wMt5qr0O3NQlFzm6IzvobzUBX4GOca03RpyReYIOUux2jdUEKzYgnK4b4IfD3oDHIbr2/kaBIUK9nhpAjV1SNw0pdu43yD0T13wN3L3Zj8NS0yzB57sOX0R1xUcsX3HAT3Npz8eoYY290kjd4NeeafDW8C1YSGZZf885jOcEBY3ODJguCogoezJXE= vpathang@vpathang-mac
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJbh1BTqkYHRbTBeJs/cBV7wfXAYdl2FH2YsWeuEAJFg mcp@rhel
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINKTYCPjrouDeMcudFlQLAdC6fAAI4/lCPrkoI4WABqq mcp@rhel
     write_files:
       - path: /etc/yum.repos.d/ubi10.repo
         owner: root:root
@@ -402,7 +402,7 @@ spec:
             - name: LINUX_MCP_ALLOWED_LOG_PATHS
               value: /var/log/messages,/var/log/secure
             - name: LINUX_MCP_BASE_URL
-              value: https://linux-mcp-my-vm-project.apps.cluster-ptrsb.dyn.redhatworkshops.io
+              value: https://linux-mcp-my-vm-project.apps.cluster-qgsvs.dyn.redhatworkshops.io
           readinessProbe:
             tcpSocket:
               port: http
@@ -448,7 +448,6 @@ metadata:
   name: linux-mcp
   namespace: my-vm-project
 spec:
-  host: linux-mcp-my-vm-project.apps.cluster-ptrsb.dyn.redhatworkshops.io
   to:
     kind: Service
     name: linux-mcp

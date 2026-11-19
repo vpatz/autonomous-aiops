@@ -77,6 +77,10 @@ The pod talks to the `linux-mcp` server deployed by
 analysis. VMs send telemetry to `aiops-workflow.my-vm-project.svc.cluster.local:4318`
 (set in the `aiops-demo.service` unit in `vm-deploy.yaml`).
 
+By default the pod runs the **mock** Ansible MCP server in-process
+(`ANSIBLE_MCP_COMMAND`) so the full remediation loop works out of the box;
+set `ANSIBLE_MCP_URL` to a real Ansible MCP server to override it.
+
 The manifest embeds the Python sources in a ConfigMap. After changing any
 file in this directory:
 

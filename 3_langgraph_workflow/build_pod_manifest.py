@@ -141,6 +141,8 @@ spec:
           value: http://linux-mcp.my-vm-project.svc.cluster.local:8000/mcp
         - name: ANSIBLE_MCP_URL
           value: ""
+        - name: ANSIBLE_MCP_COMMAND
+          value: "python3 /opt/workflow/mock_mcp_server.py --role ansible"
         - name: MCP_INSECURE_TLS
           value: "1"
         - name: WINDOW_SECONDS

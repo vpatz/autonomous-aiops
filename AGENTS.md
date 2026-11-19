@@ -105,7 +105,9 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - VM telemetry targets `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`
   (stage 3). To demo stage 2 instead, point the systemd `OTEL_EXPORTER_OTLP_ENDPOINT`
   in `vm-deploy.yaml` back at `aiops-agent` and re-create the VMs.
-- The stage-3 pod sets `LINUX_MCP_URL` but no `ANSIBLE_MCP_URL` or LLM env: on-cluster
-  remediation and LLM reasoning are off until those are provided.
+- The stage-3 pod sets `LINUX_MCP_URL` (in-cluster linux-mcp) and defaults
+  `ANSIBLE_MCP_COMMAND` to the in-pod mock Ansible MCP server, so remediation runs
+  against the mock until a real `ANSIBLE_MCP_URL` is provided. LLM env is empty:
+  agents use heuristic fallbacks until `LLM_*` is set.
 - `2_aiops_agent/agent-pod.yaml` sets only `EDA_EVENT_PASSWORD` (value `collect-only`)
   and no `EDA_EVENT_URL`, so stage-2 EDA posting is disabled until a URL is added.
