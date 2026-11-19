@@ -281,17 +281,34 @@ def build_otlp_metrics(service_name, values):
 
 
 def post_otlp(url, service_name, values, insecure=False):
-    body = build_otlp_metrics(service_name, values)
-    request = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/x-protobuf"}, method="POST",
-    )
-    context = None
-    if insecure:
-        import ssl
+    import ssl
 
-        context = ssl._create_unverified_context()
-    with urllib.request.urlopen(request, timeout=15, context=context) as response:
+    body = build_otlp_metrics(service_name, values)
+    headers = {"Content-Type": "application/x-protobuf"}
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    context = None
+    if not insecure:
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            context = None
+    try:
+        with urllib.request.urlopen(request, timeout=15, context=context) as response:
+            if response.status != 200:
+                raise ChaosError(f"collector returned HTTP {response.status}")
+            return
+    except urllib.error.URLError as exc:
+        if not isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError):
+            raise
+    # The route's CA is not verifiable from this Python (no certifi): fall
+    # back to an unverified POST rather than losing the scenario.
+    print(f"[{STEP}] note: collector TLS not verifiable; retrying unverified", flush=True)
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(
+        request, timeout=15, context=ssl._create_unverified_context()
+    ) as response:
         if response.status != 200:
             raise ChaosError(f"collector returned HTTP {response.status}")
 
