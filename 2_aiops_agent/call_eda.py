@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Step 3: post a restart event to Event-Driven Ansible.
+"""Step 3: post a restart event.
 
-Verify the request that would be sent, without contacting AAP:
+Verify the request that would be sent, without posting it:
 
     python3 2_aiops_agent/call_eda.py --dry-run
 
@@ -66,7 +66,7 @@ def self_check():
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Step 3: call Event-Driven Ansible")
+    parser = argparse.ArgumentParser(description="Step 3: post a restart event")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--url", default=DEFAULT_URL)
