@@ -1,12 +1,9 @@
 # AGENTS.md
 
-OpenShift Virtualization (KubeVirt) AIOps demo in three stages: RHEL 10 VMs run a Flask
-service (`1_vm_services/service.py`) that pushes OTLP/HTTP metrics, logs and traces to a
-collector. Stage 2 (`2_aiops_agent/`) is a simple silence-detection pipeline that posts an
-EDA restart event. Stage 3 (`3_langgraph_workflow/`, the main demo) is a LangGraph
-multi-agent workflow: anomaly detector -> root cause analyzer (inner loop, iterating
-through MCP tools) -> remediation selector (approved commands from an Ansible MCP server)
--> executor that verifies post-remediation telemetry (outer loop).
+The numbered directories are not sequential deployment steps. VM services in
+`1_vm_services/` send OTLP directly to `3_langgraph_workflow/`; `4_chaos_injector/`
+introduces faults. `2_aiops_heuristic/` is the optional standalone predecessor.
+Its entrypoint is still `aiops_agent.py` and its Service is still `aiops-agent`.
 
 ## Verify changes
 
@@ -22,14 +19,14 @@ python3 3_langgraph_workflow/workflow.py --demo          # narrative run, no clu
 python3 4_chaos_injector/chaos_injector.py --self-check
 python3 4_chaos_injector/chaos_injector.py --dry-run     # plan only, no cluster actions
 
-# stage 3 single modules (workflow --self-check runs all of these)
-python3 3_langgraph_workflow/{state,llm,mock_mcp_server,mcp_client,collector,anomaly_detector,root_cause_analyzer,remediation_selector,graph}.py --self-check
+# focused example (workflow --self-check also covers it)
+python3 3_langgraph_workflow/remediation_selector.py --self-check
 
 # stage 2 (earlier demo)
-python3 2_aiops_agent/receive_otel.py --self-check
-python3 2_aiops_agent/analyze_metrics.py --self-check
-python3 2_aiops_agent/call_eda.py --dry-run
-python3 2_aiops_agent/aiops_agent.py --self-check
+python3 2_aiops_heuristic/receive_otel.py --self-check
+python3 2_aiops_heuristic/analyze_metrics.py --self-check
+python3 2_aiops_heuristic/call_eda.py --dry-run
+python3 2_aiops_heuristic/aiops_agent.py --self-check
 ```
 
 Stage-3 module self-checks need no LLM, MCP servers, or cluster: agents fall back to
@@ -42,14 +39,14 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   files in a ConfigMap. Never edit it by hand: regenerate it with
   `python3 3_langgraph_workflow/build_pod_manifest.py` and verify with `--check` (exits
   non-zero on drift) after changing any stage-3 `.py` file.
-- `2_aiops_agent/agent-pod.yaml` embeds **full copies** of the stage-2 agent Python files
-  in a ConfigMap (maintained by hand). Any change to `2_aiops_agent/*.py` or
-  `2_aiops_agent/eda/*.py` must be mirrored into it, or the cluster silently runs stale
+- `2_aiops_heuristic/agent-pod.yaml` embeds **full copies** of the stage-2 agent Python files
+  in a ConfigMap (maintained by hand). Any change to `2_aiops_heuristic/*.py` or
+  `2_aiops_heuristic/eda/*.py` must be mirrored into it, or the cluster silently runs stale
   code.
 - VMs get `service.py` via `git clone --depth 1 https://github.com/vpatz/autonomous-aiops.git`
-  at boot (cloud-init `start-service.sh` in `vm-deploy.yaml`). Changes to `service.py` or
-  `vm-deploy.yaml` reach the VMs only after they are pushed to `main` on GitHub and the
-  VMs are re-created.
+  on each `aiops-demo.service` start (`start-service.sh` in `vm-deploy.yaml`).
+  Restarting the unit picks up pushed service code; cloud-init changes need separate
+  provisioning.
 - Both pods pip-install dependencies at startup (`langgraph`, `opentelemetry-proto` for
   stage 3; `opentelemetry-proto` for stage 2); nothing is image-built.
 
@@ -86,10 +83,8 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   progress bars, and a text area of the last 30s of received messages
   (`TelemetryStore.messages`: one line per OTLP export, SDK-internal metrics
   filtered out). A textbox at the bottom shows all agents' output across VMs
-  (from the run `findings` channel, newest last). The executor optionally posts
-  the recommended remediation to an EDA event stream when `EDA_EVENT_URL` is set
-  (stage-2 conventions: basic auth, `aiops-demo` user); the dashboard shows the
-  delivery status.
+  (from the run `findings` channel, newest last). EDA acceptance is not proof of
+  recovery: check the controller job and fresh post-action telemetry.
 - Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the eight demo scenarios
   (kill/restart service, stop network 60s, restart/shutdown VM, block telemetry 30s,
   fake telemetry, stress host to ~90% CPU/memory for 30s). In-VM commands run over `oc virt ssh` (requires the oc-virt plugin
@@ -132,9 +127,8 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 
 ## Cluster facts
 
-- Everything deploys into namespace `my-vm-project`: VMs `rhel10-service-1..4`, the
-  `linux-mcp` deployment (SSH access to the VMs) + Service/Route, `aiops-agent`
-  (stage 2) and `aiops-workflow` (stage 3) pods with Service/Route on 4318.
+- VMs `rhel10-service-1..4`, `linux-mcp` and `aiops-workflow` run in
+  `my-vm-project`; the cluster demo uses AAP in `aap`. Stage 2 is not needed.
 - Credentials never live in this repo (history was scrubbed once; keep it that way):
   the `linux-mcp-ssh` secret must be created out-of-band (`oc create secret generic
   linux-mcp-ssh -n my-vm-project --from-file=id_ed25519=...`) and the VM console
@@ -143,9 +137,13 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - VM telemetry targets `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`
   (stage 3). To demo stage 2 instead, point the systemd `OTEL_EXPORTER_OTLP_ENDPOINT`
   in `vm-deploy.yaml` back at `aiops-agent` and re-create the VMs.
-- The stage-3 pod sets `LINUX_MCP_URL` (in-cluster linux-mcp) and defaults
-  `ANSIBLE_MCP_COMMAND` to the in-pod mock Ansible MCP server, so remediation runs
-  against the mock until a real `ANSIBLE_MCP_URL` is provided. LLM env is empty:
-  agents use heuristic fallbacks until `LLM_*` is set.
-- `2_aiops_agent/agent-pod.yaml` sets only `EDA_EVENT_PASSWORD` (value `collect-only`)
+- `eda-config` supplies the HTTPS event-stream URL and Basic-auth credentials.
+  When `EDA_EVENT_URL` is set, the executor dispatches through EDA instead of
+  calling Ansible MCP. Without it, the pod defaults to mock Ansible MCP.
+- Keep `rulebooks/restart-aiops.yml` and the controller templates in sync with
+  the executor: `restart` starts the unit over SSH; `restart_vm` starts a halted
+  VM through the API using `playbooks/vm-recovery-rbac.yaml`. Silence alone
+  does not authorize powering on a VM. Sync the AAP projects and refresh the
+  activation after rulebook edits.
+- `2_aiops_heuristic/agent-pod.yaml` sets only `EDA_EVENT_PASSWORD` (value `collect-only`)
   and no `EDA_EVENT_URL`, so stage-2 EDA posting is disabled until a URL is added.

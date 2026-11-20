@@ -7,7 +7,7 @@ is returned once per cooldown.
 
 Verify:
 
-    python3 2_aiops_agent/analyze_metrics.py --self-check
+    python3 2_aiops_heuristic/analyze_metrics.py --self-check
 """
 
 from dataclasses import dataclass

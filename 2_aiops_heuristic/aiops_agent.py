@@ -7,10 +7,10 @@
 
 Verify each step, then the pipeline:
 
-    python3 2_aiops_agent/receive_otel.py --self-check
-    python3 2_aiops_agent/analyze_metrics.py --self-check
-    python3 2_aiops_agent/call_eda.py --dry-run
-    python3 2_aiops_agent/aiops_agent.py --self-check
+    python3 2_aiops_heuristic/receive_otel.py --self-check
+    python3 2_aiops_heuristic/analyze_metrics.py --self-check
+    python3 2_aiops_heuristic/call_eda.py --dry-run
+    python3 2_aiops_heuristic/aiops_agent.py --self-check
 """
 
 import html

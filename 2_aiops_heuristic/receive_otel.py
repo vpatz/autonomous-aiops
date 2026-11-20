@@ -3,11 +3,11 @@
 
 Verify without a cluster:
 
-    python3 2_aiops_agent/receive_otel.py --self-check
+    python3 2_aiops_heuristic/receive_otel.py --self-check
 
 Listen for live metrics:
 
-    python3 2_aiops_agent/receive_otel.py
+    python3 2_aiops_heuristic/receive_otel.py
 """
 
 import gzip

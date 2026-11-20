@@ -3,7 +3,7 @@
 
 Set EDA_EVENT_URL to the event endpoint. Run it from the project virtualenv:
 
-    .venv/bin/python 2_aiops_agent/eda/send_restart_event.py
+    .venv/bin/python 2_aiops_heuristic/eda/send_restart_event.py
 """
 
 import argparse

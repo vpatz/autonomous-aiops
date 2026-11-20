@@ -16,11 +16,9 @@ distributed system:
 - The RCA agent autonomously iterates to dig deeper through **MCP servers**
   (inner loop): the linux-mcp server runs commands and reads files on the
   affected VM (`systemctl status`, `journalctl`, ...).
-- The **remediation selector agent** uses the root cause to assemble the
-  required steps from the **approved commands** advertised by the Ansible
-  MCP server (outer loop remediation).
-- The executor runs the approved plan and the anomaly detector verifies the
-  post-remediation telemetry, closing the outer loop.
+- The **remediation selector** chooses a recovery action for the affected VM.
+  In the cluster demo, Event-Driven Ansible (EDA) routes the event to a
+  controller job. The agent checks fresh telemetry to verify recovery.
 
 The workflow is implemented as a LangGraph `StateGraph`; every iteration of
 every agent is kept in an append-only audit trail that drives the demo
@@ -40,19 +38,32 @@ dashboard.
                                                         remediation_selector (agent 3)
                                                                     │ approved plan
                                                                     ▼
-                                                        remediation_executor ──► Ansible MCP
+                                                        remediation_executor ──► EDA ──► Ansible job
                                                                     │
                                                         outer loop: verify ──► agent 1
 ```
 
+The two rules in [`rulebooks/restart-aiops.yml`](rulebooks/restart-aiops.yml)
+handle different failures:
+
+| Fault | EDA action | Controller job |
+| --- | --- | --- |
+| `aiops-demo.service` is down on a running VM | `restart` | [Start the unit](playbooks/restore-aiops.yml) on that VM over SSH. |
+| A previously reporting VM goes silent and KubeVirt confirms it is halted | `restart_vm` | [Start the VM](playbooks/restore-vm.yml) through the KubeVirt API. |
+
+Both jobs are limited to one named demo VM. Duplicate events leave a running
+unit or VM alone. Other chaos scenarios exercise detection and investigation;
+not every anomaly has an approved recovery action.
+
 ## Quick demo (offline, no cluster needed)
 
 ```sh
+python3 -m pip install -r 3_langgraph_workflow/requirements.txt
 python3 3_langgraph_workflow/workflow.py --demo
 python3 3_langgraph_workflow/workflow.py --self-check
 ```
 
-`--demo` prints the full sequence of steps and iterations: anomaly
+`--demo` uses synthetic telemetry and mock MCP servers. It prints the full sequence: anomaly
 detection, two MCP-backed investigation iterations, the root cause, the
 approved remediation plan, its execution, and the verification pass.
 
@@ -80,13 +91,16 @@ corrupt telemetry) into the VMs.
 3. Deploy the multi-agent workflow:
    `oc apply -f 3_langgraph_workflow/workflow-pod.yaml`
    (collector + agents + dashboard on :4318; talks to linux-mcp in-cluster)
-4. Point the workflow at an LLM endpoint (optional) and an Ansible MCP
-   server (required for real remediation) via the pod environment:
-   `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`, `ANSIBLE_MCP_URL`.
+4. For real recovery, configure the AAP event stream, rulebook activation,
+   controller templates and `eda-config` Secret as described in the
+   [workflow setup](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible).
+   `EDA_EVENT_URL` selects EDA **instead of** Ansible MCP execution; without it
+   the stock pod uses a mock executor. The optional `llm-config` Secret enables
+   model-assisted investigation.
 5. The services run cleanly, pushing telemetry only. Inject failures with
    `4_chaos_injector/chaos_injector.py` (kill a service, stop network,
-   restart/shutdown a VM, block or corrupt telemetry); the workflow detects,
-   investigates, remediates and verifies each one. Watch the unified
+   restart/shutdown a VM, block or corrupt telemetry, or stress the host).
+   Watch the agent output and telemetry on the unified
    dashboard at the `aiops-workflow` route.
 
 ## Repository layout
@@ -94,6 +108,7 @@ corrupt telemetry) into the VMs.
 | Directory | Contents |
 | --- | --- |
 | `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
-| `2_aiops_agent/` | earlier single-loop demo: silence detection -> EDA restart event |
+| `2_aiops_heuristic/` | standalone legacy demo: telemetry silence → EDA restart event. Not used or deployed by the LangGraph workflow. |
 | `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
 | `4_chaos_injector/` | chaos scenarios injected into the VMs to exercise the workflow |
+| `rulebooks/`, `playbooks/` | EDA event routing, controller recovery jobs and scoped VM-start permissions |

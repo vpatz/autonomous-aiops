@@ -3,11 +3,11 @@
 
 Verify the request that would be sent, without posting it:
 
-    python3 2_aiops_agent/call_eda.py --dry-run
+    python3 2_aiops_heuristic/call_eda.py --dry-run
 
 Send a real event:
 
-    EDA_EVENT_PASSWORD=... python3 2_aiops_agent/call_eda.py --service rhel10-service-1
+    EDA_EVENT_PASSWORD=... python3 2_aiops_heuristic/call_eda.py --service rhel10-service-1
 """
 
 import json
