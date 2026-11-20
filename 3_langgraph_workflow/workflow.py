@@ -559,9 +559,17 @@ def render_dashboard_shell():
       refs.freshFill.style.background = vm.status === 'flowing' ? 'var(--ok)' : 'var(--bad)';
       refs.freshText.textContent = vm.last_seen_seconds_ago == null ? '-' : Math.round(vm.last_seen_seconds_ago) + 's ago · observed ' + fmtDuration(observed);
 
+      // Message feed: updated on every poll, regardless of run state.
+      const lines = (svc.messages || []).map(function (m) {
+        return '[' + Math.round(m.age_seconds) + 's ago] ' + m.text;
+      });
+      refs.msgBox.value = lines.length ? lines.join('\n')
+                                       : 'no messages in the last 30s';
+      refs.msgBox.scrollTop = refs.msgBox.scrollHeight;
+
       const run = svc.run;
       if (!run) {
-        setPill(refs.anomalyPill, 'muted', 'no run yet', false);
+        setPill(refs.anomalyPill, 'ok', 'not detected', false);
         refs.anomalyText.textContent = '';
         refs.rcaText.textContent = ''; refs.rcaFill.style.width = '0%';
         refs.remText.textContent = ''; refs.remFill.style.width = '0%';
@@ -578,7 +586,7 @@ def render_dashboard_shell():
         setPill(refs.anomalyPill, 'bad', (anomaly.signals || []).join(', ') || 'anomaly', false);
         refs.anomalyText.textContent = (anomaly.severity || '') + ' · attempt ' + run.attempts + '/' + run.max_attempts;
       } else {
-        setPill(refs.anomalyPill, 'ok', 'healthy', false);
+        setPill(refs.anomalyPill, 'ok', 'not detected', false);
         refs.anomalyText.textContent = run.status || '';
       }
       const rc = run.root_cause || {};
@@ -597,13 +605,6 @@ def render_dashboard_shell():
       refs.remFill.style.background = result.ok ? 'var(--ok)' : 'var(--warn)';
       const eda = (result.eda || {}).status || 'not configured';
       refs.edaChip.textContent = 'EDA: ' + eda;
-
-      const lines = (svc.messages || []).map(function (m) {
-        return '[' + Math.round(m.age_seconds) + 's ago] ' + m.text;
-      });
-      refs.msgBox.value = lines.length ? lines.join('\n')
-                                       : 'no messages in the last 30s';
-      refs.msgBox.scrollTop = refs.msgBox.scrollHeight;
     }
 
     function update(data) {
@@ -813,9 +814,14 @@ def self_check():
     json.dumps(data, default=str)  # must be JSON-serializable
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
-                   "repeat(2, 1fr)", "cardIn", "animationDelay", "textarea", "messages"):
+                   "repeat(2, 1fr)", "cardIn", "animationDelay", "textarea", "messages",
+                   "not detected"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
+    # The message feed must update before the run-state early returns, or
+    # cards without a run never fill the text area.
+    if not shell.index("msgBox.value") < shell.index("const run = svc.run"):
+        raise SystemExit(f"{STEP}: message feed update must precede the run handling")
 
     final = run_offline_demo()
     if final.get("status") != state.STATUS_REMEDIATED:
