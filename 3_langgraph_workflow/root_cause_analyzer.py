@@ -64,7 +64,7 @@ def _fallback_next_action(investigation, tools, iteration, service_name):
     return {"action": "conclude", "root_cause": _conclude(investigation)}
 
 
-def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
+def _llm_next_action(service_name, anomaly, investigation, tools, iteration, max_iterations):
     """Ask the LLM for the next investigation action as a JSON decision."""
     tool_catalog = [
         {"name": tool.get("name"), "description": tool.get("description", ""),
@@ -85,6 +85,11 @@ def _llm_next_action(anomaly, investigation, tools, iteration, max_iterations):
         "or, once you know the root cause:\n"
         '{"action": "conclude", "root_cause": {"component": "...", "summary": "...", '
         '"confidence": "high|medium|low"}}\n\n'
+        "Ground every argument in these facts (never invent names):\n"
+        f"- The service runs on VM '{service_name}'. Any 'host' argument must be "
+        f"exactly '{service_name}'.\n"
+        f"- The systemd unit is '{SERVICE_UNIT}'. Any 'service_name' or 'unit' "
+        f"argument must be '{SERVICE_UNIT}'.\n\n"
         f"Iteration: {iteration}/{max_iterations}\n"
         f"Service anomaly: {json.dumps(anomaly)[:600]}\n"
         f"MCP tools available: {json.dumps(tool_catalog)[:1500]}\n"
@@ -164,7 +169,9 @@ def build_node(linux_mcp=None, use_llm=True):
         decision = None
         if use_llm and llm.available() and tools:
             try:
-                decision = _llm_next_action(anomaly, investigation, tools, iteration, max_iterations)
+                decision = _llm_next_action(
+                    service_name, anomaly, investigation, tools, iteration, max_iterations
+                )
             except Exception:  # noqa: BLE001 - LLM is best effort
                 decision = None
         if decision is None:
@@ -344,6 +351,25 @@ def self_check():
     ])
     if "dummy-crash" not in running["summary"]:
         raise SystemExit(f"{STEP}: running service with fault evidence misattributed: {running}")
+
+    # The LLM prompt must ground the model in the real host and unit names.
+    saved_chat = llm.chat_json
+    captured = {}
+
+    def fake_chat_json(messages):
+        captured["prompt"] = messages[0]["content"]
+        return {"action": "conclude", "root_cause": {
+            "component": SERVICE_UNIT, "summary": "x", "confidence": "high"}}
+
+    llm.chat_json = fake_chat_json
+    try:
+        _llm_next_action("rhel10-service-1", {"detected": True, "signals": []},
+                         [], tools, 1, 5)
+    finally:
+        llm.chat_json = saved_chat
+    if ("'rhel10-service-1'" not in captured["prompt"]
+            or f"'{SERVICE_UNIT}'" not in captured["prompt"]):
+        raise SystemExit(f"{STEP}: LLM prompt must name the host and unit: {captured['prompt'][:300]}")
     print(f"{STEP}: self-check ok", flush=True)
 
 
