@@ -76,6 +76,10 @@ corrupt telemetry) into the VMs.
 
 ## Infra setup (OpenShift Virtualization)
 
+For a fresh cluster, start with the [reference cluster snapshot and rebuild
+guide](0_cluster_setup/README.md). It covers platform prerequisites, AAP rulebook
+activation and MLflow before the application deployment below.
+
 1. Create the secret the linux-mcp server uses to reach the VMs (private
    keys never live in this repo):
    `ssh-keygen -t ed25519 -f mcp_id_ed25519 -C mcp@rhel`
@@ -107,6 +111,7 @@ corrupt telemetry) into the VMs.
 
 | Directory | Contents |
 | --- | --- |
+| `0_cluster_setup/` | live reference inventory, portable platform manifests and new-cluster runbook |
 | `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
 | `2_aiops_heuristic/` | standalone legacy demo: telemetry silence → EDA restart event. Not used or deployed by the LangGraph workflow. |
 | `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |

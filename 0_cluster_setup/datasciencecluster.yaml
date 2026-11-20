@@ -1,0 +1,11 @@
+apiVersion: datasciencecluster.opendatahub.io/v3
+kind: DataScienceCluster
+metadata:
+  name: default-dsc
+spec:
+  components:
+    dashboard:
+      standard:
+        managementState: Managed
+    mlflowoperator:
+      managementState: Managed

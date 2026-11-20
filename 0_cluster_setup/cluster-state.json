@@ -1,0 +1,319 @@
+{
+  "captured_utc": "2026-11-20T18:14:03+00:00",
+  "openshift": {
+    "version": "4.20.46",
+    "channel": "stable-4.20",
+    "platform": "None",
+    "topology": "SingleReplica",
+    "ingress_domain": "apps.cluster-qgsvs.dyn.redhatworkshops.io"
+  },
+  "nodes": [
+    {
+      "name": "control-plane-cluster-qgsvs-1",
+      "allocatable_cpu": "31500m",
+      "allocatable_memory": "130735660Ki",
+      "architecture": "amd64",
+      "roles": [
+        "control-plane",
+        "master",
+        "worker"
+      ],
+      "ready": "True"
+    }
+  ],
+  "subscriptions": [
+    {
+      "namespace": "aap",
+      "package": "ansible-automation-platform-operator",
+      "channel": "stable-2.7",
+      "catalog": "redhat-operators",
+      "installed_csv": "aap-operator.v2.7.0-0.1794269743"
+    },
+    {
+      "namespace": "cert-manager-operator",
+      "package": "openshift-cert-manager-operator",
+      "channel": "stable-v1",
+      "catalog": "redhat-operators",
+      "installed_csv": "cert-manager-operator.v1.20.1"
+    },
+    {
+      "namespace": "openshift-cnv",
+      "package": "kubevirt-hyperconverged",
+      "channel": "stable",
+      "catalog": "redhat-operators",
+      "installed_csv": "kubevirt-hyperconverged-operator.v4.20.35"
+    },
+    {
+      "namespace": "openshift-operators",
+      "package": "opendatahub-operator",
+      "channel": "fast-3",
+      "catalog": "community-operators",
+      "installed_csv": "opendatahub-operator.v3.6.0"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "cephcsi-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "cephcsi-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "mcg-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "mcg-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "ocs-client-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "ocs-client-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "ocs-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "ocs-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "odf-csi-addons-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "odf-csi-addons-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "odf-dependencies",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "odf-dependencies.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "odf-external-snapshotter-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "odf-external-snapshotter-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "odf-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "odf-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "odf-prometheus-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "odf-prometheus-operator.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "recipe",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "recipe.v4.20.21-rhodf"
+    },
+    {
+      "namespace": "openshift-storage",
+      "package": "rook-ceph-operator",
+      "channel": "stable-4.20",
+      "catalog": "redhat-operators",
+      "installed_csv": "rook-ceph-operator.v4.20.21-rhodf"
+    }
+  ],
+  "storage_classes": [
+    {
+      "name": "ocs-external-storagecluster-ceph-rbd",
+      "provisioner": "openshift-storage.rbd.csi.ceph.com",
+      "binding": "WaitForFirstConsumer",
+      "default": true
+    },
+    {
+      "name": "ocs-external-storagecluster-ceph-rbd-immediate",
+      "provisioner": "openshift-storage.rbd.csi.ceph.com",
+      "binding": "Immediate",
+      "default": false
+    },
+    {
+      "name": "ocs-external-storagecluster-cephfs",
+      "provisioner": "openshift-storage.cephfs.csi.ceph.com",
+      "binding": "Immediate",
+      "default": false
+    },
+    {
+      "name": "openshift-storage.noobaa.io",
+      "provisioner": "openshift-storage.noobaa.io/obc",
+      "binding": "Immediate",
+      "default": false
+    }
+  ],
+  "image_source": {
+    "name": "rhel10",
+    "namespace": "openshift-virtualization-os-images",
+    "source_kind": [
+      "snapshot"
+    ],
+    "ready": "True"
+  },
+  "platform_conditions": {
+    "hyperconverged": {
+      "ReconcileComplete": "True",
+      "Available": "True",
+      "Progressing": "False",
+      "Degraded": "False",
+      "Upgradeable": "True"
+    },
+    "aap": {
+      "ConfigurationValid": "Unknown",
+      "Running": "True",
+      "Successful": "True",
+      "Failure": "False"
+    },
+    "default-dsc": {
+      "Ready": "False",
+      "ComponentsReady": "True",
+      "ModulesReady": "False",
+      "ProvisioningSucceeded": "True",
+      "AIGatewayReady": "False",
+      "AIGridReady": "False",
+      "AIHubReady": "True",
+      "AIPipelinesReady": "True",
+      "BatchGatewayReady": "False",
+      "DashboardReady": "True",
+      "DataReady": "True",
+      "DatabaseServiceReady": "False",
+      "KserveLLMInferenceServiceDependencies": "False",
+      "KserveLLMInferenceServiceWideEPDependencies": "False",
+      "KserveReady": "True",
+      "KueueReady": "False",
+      "MCPLifecycleOperatorReady": "True",
+      "MLflowOperatorReady": "True",
+      "MaaSPortalAvailable": "False",
+      "ModelsAsAServiceReady": "False",
+      "OGXReady": "True",
+      "RayReady": "True",
+      "SparkOperatorReady": "False",
+      "TrainerReady": "False",
+      "TrustyAIReady": "True",
+      "WorkbenchesReady": "True",
+      "WorkbenchesV2Ready": "False"
+    },
+    "mlflow": {
+      "MLflowOperatorReady": "True",
+      "Available": "True",
+      "Progressing": "False",
+      "Migration": "True"
+    }
+  },
+  "mlflow": {
+    "version": "3.17.0",
+    "address": "https://mlflow.opendatahub.svc:8443/mlflow",
+    "pvc": "Bound"
+  },
+  "demo": {
+    "namespace": "my-vm-project",
+    "workflow_pod": {
+      "phase": "Running",
+      "ready": "True",
+      "service_account": "aiops-workflow",
+      "secret_refs": [
+        "eda-config",
+        "llm-config"
+      ]
+    },
+    "vms": [
+      {
+        "name": "rhel10-service-1",
+        "state": "Running",
+        "ready": "True",
+        "volumes": [
+          "rhel10-root-volume-1"
+        ]
+      },
+      {
+        "name": "rhel10-service-2",
+        "state": "Running",
+        "ready": "True",
+        "volumes": [
+          "rhel10-root-volume-2"
+        ]
+      },
+      {
+        "name": "rhel10-service-3",
+        "state": "Running",
+        "ready": "True",
+        "volumes": [
+          "rhel10-root-volume-3"
+        ]
+      },
+      {
+        "name": "rhel10-service-4",
+        "state": "Running",
+        "ready": "True",
+        "volumes": [
+          "rhel10-root-volume-4"
+        ]
+      }
+    ],
+    "pvcs": [
+      {
+        "name": "rhel10-root-volume-1",
+        "phase": "Bound",
+        "storage_class": "ocs-external-storagecluster-ceph-rbd",
+        "capacity": "40Gi"
+      },
+      {
+        "name": "rhel10-root-volume-2",
+        "phase": "Bound",
+        "storage_class": "ocs-external-storagecluster-ceph-rbd",
+        "capacity": "40Gi"
+      },
+      {
+        "name": "rhel10-root-volume-3",
+        "phase": "Bound",
+        "storage_class": "ocs-external-storagecluster-ceph-rbd",
+        "capacity": "40Gi"
+      },
+      {
+        "name": "rhel10-root-volume-4",
+        "phase": "Bound",
+        "storage_class": "ocs-external-storagecluster-ceph-rbd",
+        "capacity": "40Gi"
+      }
+    ],
+    "services": {
+      "aiops-workflow": [
+        4318
+      ],
+      "linux-mcp": [
+        8000
+      ],
+      "rhel10-service-1": [
+        22
+      ],
+      "rhel10-service-2": [
+        22
+      ],
+      "rhel10-service-3": [
+        22
+      ],
+      "rhel10-service-4": [
+        22
+      ]
+    },
+    "routes": {
+      "aiops-workflow": "aiops-workflow-my-vm-project.apps.cluster-qgsvs.dyn.redhatworkshops.io",
+      "linux-mcp": "linux-mcp-my-vm-project.apps.cluster-qgsvs.dyn.redhatworkshops.io"
+    },
+    "deployments": {
+      "linux-mcp": 1
+    }
+  }
+}
