@@ -85,28 +85,39 @@ def ansible_tools():
 
 
 def _systemctl_status():
-    state = "running" if _ANSIBLE_STATE["restarted"] else "running (fault reported)"
+    if _ANSIBLE_STATE["restarted"]:
+        return (
+            f"\u25cf {SERVICE_UNIT} - AIOps demo service\n"
+            "     Loaded: loaded (/etc/systemd/system/aiops-demo.service; enabled; preset: enabled)\n"
+            f"     Active: active (running) since Fri 2026-11-20 10:31:02 UTC; 12s ago\n"
+            "   Main PID: 4172 (python3)\n"
+            "      Tasks: 4 (limit: 4915)\n"
+            "     Memory: 58.7M\n"
+            "        CPU: 1.104s\n"
+            "     CGroup: /system.slice/aiops-demo.service\n"
+            "             \u2514\u25004172 /opt/aiops/venv/bin/python /opt/aiops/src/1_vm_services/service.py\n"
+        )
     return (
         f"\u25cf {SERVICE_UNIT} - AIOps demo service\n"
         "     Loaded: loaded (/etc/systemd/system/aiops-demo.service; enabled; preset: enabled)\n"
-        f"     Active: active ({state}) since Tue 2026-11-17 10:09:04 UTC; 12min ago\n"
-        "   Main PID: 2841 (python3)\n"
-        "      Tasks: 4 (limit: 4915)\n"
-        "     Memory: 61.2M\n"
+        "     Active: failed (Result: exit-code) since Fri 2026-11-20 10:24:41 UTC; 3min 51s ago\n"
+        "   Main PID: 2841 (code=killed, status=9/KILL)\n"
         "        CPU: 4.216s\n"
-        "     CGroup: /system.slice/aiops-demo.service\n"
-        "             \u2514\u25002841 /opt/aiops/venv/bin/python /opt/aiops/src/1_vm_services/service.py\n"
     )
 
 
 def _journalctl():
+    if _ANSIBLE_STATE["restarted"]:
+        return (
+            "Nov 20 10:31:02 rhel10-service-1 systemd[1]: Started AIOps demo service.\n"
+            "Nov 20 10:31:05 rhel10-service-1 python3[4172]: serving on 0.0.0.0:5000\n"
+        )
     return (
         "-- Boot 6e5a2f9c... --\n"
-        "Nov 17 10:09:04 rhel10-service-1 systemd[1]: Started AIOps demo service.\n"
-        "Nov 17 10:09:07 rhel10-service-1 python3[2841]: service app will send dummy-crash in 187.4s\n"
-        "Nov 17 10:12:14 rhel10-service-1 python3[2841]: service app sent dummy-crash event\n"
-        "Nov 17 10:12:14 rhel10-service-1 python3[2841]: ERROR: service app simulated a dummy crash\n"
-        "Nov 17 10:12:15 rhel10-service-1 systemd[1]: aiops-demo.service: Deactivated successfully.\n"
+        "Nov 20 10:09:04 rhel10-service-1 systemd[1]: Started AIOps demo service.\n"
+        "Nov 20 10:09:07 rhel10-service-1 python3[2841]: service app running\n"
+        "Nov 20 10:24:41 rhel10-service-1 systemd[1]: aiops-demo.service: Main process exited, code=killed, status=9/KILL\n"
+        "Nov 20 10:24:41 rhel10-service-1 systemd[1]: aiops-demo.service: Failed with result 'exit-code'.\n"
     )
 
 
@@ -250,19 +261,20 @@ def serve(role):
 
 def self_check():
     status = linux_call("run_command", {"command": f"systemctl status {SERVICE_UNIT}"})
-    if "active (running" not in status:
-        raise SystemExit(f"mock linux: status looks wrong: {status[:80]}")
+    if "failed (Result: exit-code)" not in status or "status=9/KILL" not in status:
+        raise SystemExit(f"mock linux: killed service not reported: {status[:120]}")
     journal = linux_call("run_command", {"command": "journalctl -u aiops-demo.service"})
-    if "dummy crash" not in journal:
-        raise SystemExit("mock linux: journal missing dummy crash")
-    if "dummy-crash" not in ansible_call("list_approved_modules", {}).replace("dummy-crash", ""):
-        pass  # approved modules text has no crash reference; sanity below
+    if "code=killed, status=9/KILL" not in journal:
+        raise SystemExit("mock linux: journal missing the kill signature")
     modules = ansible_call("list_approved_modules", {})
     if "ansible.builtin.systemd" not in modules:
         raise SystemExit("mock ansible: approved modules missing systemd")
     result = json.loads(ansible_call("run_module", {"host": "vm-1", "module": "ansible.builtin.systemd", "arguments": {"name": SERVICE_UNIT, "state": "restarted"}}))
     if not result.get("changed") or not service_restarted():
         raise SystemExit("mock ansible: restart did not register")
+    recovered = linux_call("run_command", {"command": f"systemctl status {SERVICE_UNIT}"})
+    if "active (running)" not in recovered:
+        raise SystemExit(f"mock linux: service should recover after restart: {recovered[:120]}")
     try:
         ansible_call("run_module", {"host": "vm-1", "module": "ansible.builtin.shell", "arguments": {}})
         raise SystemExit("mock ansible: unapproved module should be rejected")

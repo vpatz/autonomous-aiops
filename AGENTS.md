@@ -97,10 +97,11 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Stage 2: `receive_otel.py` and `call_eda.py` insert `eda/` into `sys.path`
   (`__file__`-relative) and import `receive_metrics` / `send_restart_event` as top-level
   modules — do not move or rename files without updating those inserts.
-- Crash simulation: `service.py` emits a `dummy-crash` **fault** — a metric, an ERROR log
-  and a failed span — at a random time within `DUMMY_CRASH_MAX_DELAY_SECONDS` (default
-  300). It does not exit; the systemd unit has `Restart=no`, and stage 3 remediates the
-  fault state by restarting the unit through the Ansible MCP server.
+- `service.py` runs cleanly and only pushes telemetry (metrics every 5s, Flask
+  request spans, an OTLP log pipeline). Faults are injected exclusively by the
+  stage-4 chaos injector; the systemd unit has `Restart=no`, so a killed service
+  stays down until the workflow remediates it. The detector still recognizes a
+  `dummy-crash` counter increment as a fault signal for services that report one.
 - Stage 3 verification semantics: a service is "down" when its latest metrics are older
   than `--silence-seconds` (default 10s; services never seen are never restarted); the
   RCA inner loop is bounded by `--max-iterations` (5), the remediation outer loop by

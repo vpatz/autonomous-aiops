@@ -83,10 +83,11 @@ corrupt telemetry) into the VMs.
 4. Point the workflow at an LLM endpoint (optional) and an Ansible MCP
    server (required for real remediation) via the pod environment:
    `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`, `ANSIBLE_MCP_URL`.
-5. The service in each VM emits a `dummy-crash` fault (metric + ERROR log +
-   failed span) at a random time (set `DUMMY_CRASH_MAX_DELAY_SECONDS` to
-   control it). The workflow detects, investigates, remediates and verifies
-   it; watch the dashboard at the `aiops-workflow` route.
+5. The services run cleanly, pushing telemetry only. Inject failures with
+   `4_chaos_injector/chaos_injector.py` (kill a service, stop network,
+   restart/shutdown a VM, block or corrupt telemetry); the workflow detects,
+   investigates, remediates and verifies each one. Watch the unified
+   dashboard at the `aiops-workflow` route.
 
 ## Repository layout
 

@@ -7,7 +7,7 @@ concurrently.
 | Scenario | What it does | What the workflow sees |
 | --- | --- | --- |
 | `kill-service` | `SIGKILL aiops-demo.service` (stays down, `Restart=no`) | `metrics-silent` (persistent) |
-| `restart-service` | `systemctl restart aiops-demo.service` | telemetry gap, then a fresh `dummy-crash` fault |
+| `restart-service` | `systemctl restart aiops-demo.service` | telemetry gap while the unit restarts (the dashboard counts the restart from the uptime reset) |
 | `stop-network` | `nmcli networking off` for 60s; recovery is scheduled with a systemd timer **before** the outage | `metrics-silent` while the host is unreachable |
 | `restart-vm` | deletes the VMI; the VM controller recreates it (reboot) | `metrics-silent` during the reboot, fresh fault after |
 | `shutdown-vm` | sets `spec.running=false` (stays down) | `metrics-silent` (persistent) |

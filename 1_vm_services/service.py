@@ -7,18 +7,16 @@ Metrics, logs and traces are pushed over OTLP/HTTP to
 OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
 OTEL_METRIC_EXPORT_INTERVAL ms. Host CPU and memory load are
 service.cpu.load and service.memory.load.
-A random time within DUMMY_CRASH_MAX_DELAY_SECONDS (default 300) of start
-sends a dummy-crash metric, an ERROR log record and a failed span instead of
-exiting: the multi-agent workflow detects the fault state and remediates it.
+
+The service runs cleanly: failures are injected externally with
+4_chaos_injector/chaos_injector.py (kill-service, stop-network, ...) and
+remediated by the multi-agent workflow.
 """
 
 import atexit
 import logging
 import os
-import random
 import socket
-import sys
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -49,8 +47,6 @@ os.environ.setdefault("OTEL_SERVICE_NAME", "aiops-service-app")
 os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://192.168.64.1:4318")
 os.environ.setdefault("OTEL_METRIC_EXPORT_INTERVAL", "5000")
 
-DUMMY_CRASH_MAX_DELAY = float(os.environ.get("DUMMY_CRASH_MAX_DELAY_SECONDS", "300"))
-
 app = Flask(__name__)
 STARTED_AT = time.time()
 
@@ -67,7 +63,6 @@ _tracer_provider = TracerProvider(resource=_resource)
 _tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
 trace.set_tracer_provider(_tracer_provider)
 atexit.register(_tracer_provider.shutdown)
-_tracer = trace.get_tracer("aiops.service.app")
 
 _logger_provider = LoggerProvider(resource=_resource)
 _logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
@@ -88,30 +83,6 @@ health_checks = _meter.create_counter(
     "health.checks",
     description="Times the health endpoint was called",
 )
-dummy_crash = _meter.create_counter(
-    "dummy-crash",
-    description="Dummy crash event sent instead of exiting the process",
-)
-
-
-def _send_dummy_crash():
-    delay = random.uniform(0, DUMMY_CRASH_MAX_DELAY)
-    print(f"service app will send dummy-crash in {delay:.1f}s", file=sys.stderr, flush=True)
-    time.sleep(delay)
-    dummy_crash.add(1)
-    # The fault state is visible in all three telemetry signals: a metric,
-    # an ERROR log record, and a failed span. The process keeps running.
-    with _tracer.start_as_current_span("dummy-crash") as span:
-        span.set_status(trace.Status(trace.StatusCode.ERROR, "dummy crash"))
-        span.add_event("dummy-crash")
-        _log.error("service app simulated a dummy crash")
-    _provider.force_flush()
-    _tracer_provider.force_flush()
-    _logger_provider.force_flush()
-    print("service app sent dummy-crash event", file=sys.stderr, flush=True)
-
-
-threading.Thread(target=_send_dummy_crash, name="dummy-crash", daemon=True).start()
 
 
 def _observe_uptime(_options):

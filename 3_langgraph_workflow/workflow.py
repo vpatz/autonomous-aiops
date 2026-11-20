@@ -104,22 +104,20 @@ def run_offline_demo():
         if mock_mcp_server.service_restarted():
             anomaly_flag["anomalous"] = False
         if anomaly_flag["anomalous"]:
+            # The chaos injector killed the service: telemetry went silent.
             return {
                 "ever_seen": True,
-                "last_seen_seconds_ago": 3.0,
-                "metrics": {"service.uptime": 187.4, "service.cpu.load": 6.2,
-                            "service.memory.load": 31.0, "dummy-crash": 1},
-                "metric_events": [
-                    {"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}
-                ],
-                "logs": [{"severity_number": 17, "severity_text": "ERROR",
-                          "body": "service app simulated a dummy crash"}],
-                "traces": [{"name": "dummy-crash", "status_code": 2,
-                            "status_message": "dummy crash"}],
+                "last_seen_seconds_ago": 42.0,
+                "observed_for_seconds": 620.0,
+                "metrics": {},
+                "metric_events": [],
+                "logs": [],
+                "traces": [],
             }
         return {
             "ever_seen": True,
             "last_seen_seconds_ago": 1.0,
+            "observed_for_seconds": 620.0,
             "metrics": {"service.uptime": 2.0, "service.cpu.load": 4.0},
             "metric_events": [],
             "logs": [],
@@ -134,7 +132,7 @@ def run_offline_demo():
         verify_wait_seconds=0,
     )
     service_name = "rhel10-service-1"
-    print(f"{STEP}: anomaly injected into the telemetry window for {service_name}", flush=True)
+    print(f"{STEP}: chaos injector killed the service on {service_name}; telemetry went silent", flush=True)
     final = graph.run(app, state.initial_state(
         service_name,
         telemetry=get_window(service_name, 120),

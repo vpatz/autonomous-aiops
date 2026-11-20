@@ -48,19 +48,24 @@ Run the real collector/workflow against the real demo service, with the
 mock MCP servers standing in for the cluster ones:
 
 ```sh
+# terminal 1: the workflow (collector + agents), mock MCP servers
 python3 3_langgraph_workflow/workflow.py --run-once --service local-demo \
-  --window-seconds 30 --silence-seconds 6 --verify-wait-seconds 25 \
+  --window-seconds 30 --silence-seconds 6 --verify-wait-seconds 90 \
   --linux-mcp-command  "python3 3_langgraph_workflow/mock_mcp_server.py --role linux" \
-  --ansible-mcp-command "python3 3_langgraph_workflow/mock_mcp_server.py --role ansible" &
+  --ansible-mcp-command "python3 3_langgraph_workflow/mock_mcp_server.py --role ansible"
 
+# terminal 2: the demo service (runs cleanly, telemetry only)
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_SERVICE_NAME=local-demo \
-DUMMY_CRASH_MAX_DELAY_SECONDS=10 python3 1_vm_services/service.py
+python3 1_vm_services/service.py
 ```
 
-The service sends metrics every 5s, then a dummy-crash metric, an ERROR log
-and a failed span. The workflow detects it, investigates through the mock
-linux-mcp, restarts the service through the mock Ansible MCP, verifies the
-post-remediation window, and prints `final status: remediated`.
+The service sends metrics every 5s. Kill it (`kill -9` the python process)
+to simulate the chaos injector's `kill-service` scenario: the workflow
+detects the silence, investigates through the mock linux-mcp, runs the
+approved remediation through the mock Ansible MCP, and waits for telemetry
+to resume. Start the service again in terminal 2 and the run verifies and
+prints `final status: remediated`. On the cluster the same loop runs for
+real, driven by `4_chaos_injector/chaos_injector.py`.
 
 ## Deployed mode (OpenShift)
 

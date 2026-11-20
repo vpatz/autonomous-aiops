@@ -241,9 +241,11 @@ def self_check():
     def handler(name, arguments):
         calls.append((name, arguments))
         if arguments.get("command", "").startswith("systemctl"):
-            return "Active: active (running) since Tue 2026-11-17; Main PID: 2841"
+            return ("Active: failed (Result: exit-code) since Fri 2026-11-20 10:24:41 UTC; "
+                    "Main PID: 2841 (code=killed, status=9/KILL)")
         if arguments.get("command", "").startswith("journalctl"):
-            return "python3[2841]: service app sent dummy-crash event\npython3[2841]: ERROR: service app simulated a dummy crash"
+            return ("systemd[1]: aiops-demo.service: Main process exited, code=killed, status=9/KILL\n"
+                    "systemd[1]: aiops-demo.service: Failed with result 'exit-code'.")
         return "[mock] ok"
 
     tools = [
@@ -280,8 +282,8 @@ def self_check():
     root_cause = workflow_state["root_cause"]
     if not root_cause["found"] or root_cause["component"] != SERVICE_UNIT:
         raise SystemExit(f"{STEP}: bad root cause {root_cause}")
-    if root_cause["confidence"] != "high" or "dummy-crash" not in root_cause["summary"]:
-        raise SystemExit(f"{STEP}: crash evidence not concluded {root_cause}")
+    if root_cause["confidence"] != "high" or "not running" not in root_cause["summary"]:
+        raise SystemExit(f"{STEP}: killed service not concluded {root_cause}")
     if len(calls) < 2:
         raise SystemExit(f"{STEP}: expected 2 tool calls, got {len(calls)}")
 

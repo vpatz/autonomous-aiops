@@ -4,8 +4,8 @@
 Injects failure scenarios randomly into one or more VMs, concurrently:
 
   1. kill-service      SIGKILL aiops-demo.service (stays down; Restart=no)
-  2. restart-service   systemctl restart aiops-demo.service (a fresh
-                       dummy-crash fault follows within DUMMY_CRASH_MAX_DELAY)
+  2. restart-service   systemctl restart aiops-demo.service (telemetry gap
+                       while the unit restarts)
   3. stop-network      nmcli networking off for --network-seconds (default
                        60); recovery is scheduled with a systemd timer
                        BEFORE the outage so it is self-healing
@@ -179,7 +179,7 @@ def scenario_kill_service(vm, runner, cfg):
 
 def scenario_restart_service(vm, runner, cfg):
     runner.ssh(vm, f"sudo -n systemctl restart {SERVICE_UNIT}",
-               "restart the demo service (telemetry gap, then a fresh fault)")
+               "restart the demo service (telemetry gap; the dashboard counts the restart)")
 
 
 def scenario_stop_network(vm, runner, cfg):

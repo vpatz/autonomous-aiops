@@ -289,12 +289,13 @@ def _mock_command(role):
 def self_check():
     import mock_mcp_server
 
+    mock_mcp_server.reset()
     fake = FakeMcpClient(mock_mcp_server.linux_tools(), mock_mcp_server.linux_call)
     names = [tool["name"] for tool in fake.list_tools()]
     if "run_command" not in names:
         raise SystemExit(f"mcp client: fake tools/list missing run_command: {names}")
     status = fake.call_tool("run_command", {"command": "systemctl status aiops-demo.service"})
-    if "active (running" not in status:
+    if "failed (Result: exit-code)" not in status:
         raise SystemExit("mcp client: fake tools/call returned unexpected status output")
     try:
         fake.call_tool("nope", {})
@@ -309,7 +310,7 @@ def self_check():
     if "run_command" not in names:
         raise SystemExit(f"mcp client: stdio tools/list missing run_command: {names}")
     journal = linux.call_tool("run_command", {"command": "journalctl -u aiops-demo.service"})
-    if "dummy crash" not in journal:
+    if "code=killed, status=9/KILL" not in journal:
         raise SystemExit("mcp client: stdio tools/call journal looks wrong")
     linux.close()
 

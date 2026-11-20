@@ -83,21 +83,21 @@ def _fake_window(anomaly_flag):
 
     def window(service, seconds, since=None):
         if anomaly_flag["anomalous"]:
+            # The chaos injector killed the service: it was seen, then went
+            # silent (no metrics, logs or traces in the window).
             return {
                 "ever_seen": True,
-                "last_seen_seconds_ago": 3.0,
-                "metrics": {"service.uptime": 187.0, "dummy-crash": 1},
-                "metric_events": [
-                    {"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}
-                ],
-                "logs": [{"severity_number": 17, "severity_text": "ERROR",
-                          "body": "service app simulated a dummy crash"}],
-                "traces": [{"name": "dummy-crash", "status_code": 2,
-                            "status_message": "dummy crash"}],
+                "last_seen_seconds_ago": 42.0,
+                "observed_for_seconds": 620.0,
+                "metrics": {},
+                "metric_events": [],
+                "logs": [],
+                "traces": [],
             }
         return {
             "ever_seen": True,
             "last_seen_seconds_ago": 1.0,
+            "observed_for_seconds": 620.0,
             "metrics": {"service.uptime": 2.0},
             "metric_events": [],
             "logs": [],
