@@ -13,6 +13,7 @@ concurrently.
 | `shutdown-vm` | sets `spec.running=false` (stays down) | `metrics-silent` (persistent) |
 | `block-telemetry` | nftables reject rule on VM egress to port 4318 for 30s | `metrics-silent` while the service keeps running |
 | `alter-telemetry` | blocks the real telemetry and publishes fake OTLP metrics (impossible zeros or a CPU spike) for 60s | `zero-telemetry` or `cpu-saturation` |
+| `stress-host` | drives **real** host CPU and memory utilization to ~90% for 30s (`--stress-seconds`); a self-terminating python stress unit | `cpu-saturation` + `memory-pressure` |
 
 ## Prerequisites
 

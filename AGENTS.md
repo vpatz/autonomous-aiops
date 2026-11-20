@@ -84,9 +84,9 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   remediation to an EDA event stream when `EDA_EVENT_URL` is set (stage-2
   conventions: basic auth, `aiops-demo` user); the dashboard shows the
   delivery status.
-- Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the seven demo scenarios
+- Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the eight demo scenarios
   (kill/restart service, stop network 60s, restart/shutdown VM, block telemetry 30s,
-  fake telemetry). In-VM commands run over `oc virt ssh` (requires the oc-virt plugin
+  fake telemetry, stress host to ~90% CPU/memory for 30s). In-VM commands run over `oc virt ssh` (requires the oc-virt plugin
   and the linux-mcp key at `~/.ssh/mcp_id_ed25519`); VM ops use `oc delete vmi` /
   `oc patch vm`; fake telemetry is OTLP-posted to the collector route. Timed scenarios
   schedule their own recovery with `systemd-run --on-active=N` before the outage —

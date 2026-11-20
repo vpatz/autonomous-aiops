@@ -16,6 +16,9 @@ Injects failure scenarios randomly into one or more VMs, concurrently:
   7. alter-telemetry   block the real telemetry and publish fake OTLP
                        metrics under the service's name for --duration
                        (default 60): impossible zeros or a CPU spike
+  8. stress-host       drive real host CPU and memory utilization to ~90%
+                       for --stress-seconds (default 30); the stress unit
+                       self-terminates
 
 In-VM scenarios execute over `oc virt ssh`, tunneled through the API server
 (requires the oc-virt plugin and the linux-mcp SSH key, default
@@ -36,6 +39,7 @@ Examples:
 """
 
 import argparse
+import base64
 import json
 import os
 import random
@@ -54,6 +58,50 @@ DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
 
 ZEROS = {"service.uptime": 999.0, "service.cpu.load": 0.0, "service.memory.load": 0.0}
 SPIKE = {"service.uptime": 999.0, "service.cpu.load": 97.5, "service.memory.load": 88.0}
+
+# stress-host targets: just above the detector's 90% saturation threshold,
+# so real telemetry reliably raises cpu-saturation and memory-pressure.
+STRESS_CPU_DUTY = 0.92   # busy fraction per core per 1s cycle
+STRESS_MEMORY_FREE = 0.08  # fraction of MemTotal to leave available
+
+STRESS_TEMPLATE = """import multiprocessing
+import time
+
+DURATION = {duration}
+DUTY = {duty}    # busy fraction per core per cycle
+FREE = {free}    # fraction of MemTotal to leave available
+
+
+def cpu_worker():
+    end = time.monotonic() + DURATION
+    while time.monotonic() < end:
+        busy_until = time.monotonic() + DUTY
+        while time.monotonic() < busy_until:
+            pass
+        time.sleep(1.0 - DUTY)
+
+
+def main():
+    info = {{}}
+    for line in open("/proc/meminfo"):
+        key, value = line.split(":", 1)
+        info[key] = int(value.split()[0])
+    total = info["MemTotal"]
+    available = info.get("MemAvailable", info["MemFree"])
+    hold = max(0, int((available - total * FREE) * 1024))
+    blob = bytearray(hold)  # allocated and zeroed, so the pages are resident
+    workers = [
+        multiprocessing.Process(target=cpu_worker)
+        for _ in range(multiprocessing.cpu_count())
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+
+main()
+"""
 
 
 class ChaosError(Exception):
@@ -234,6 +282,26 @@ def scenario_block_telemetry(vm, runner, cfg):
     _block_telemetry(vm, runner, cfg, cfg.telemetry_seconds)
 
 
+def scenario_stress_host(vm, runner, cfg):
+    """Drive real host CPU and memory utilization to ~90% for a bounded
+    time. Unlike alter-telemetry (which fabricates values), this loads the
+    VM itself, so the true telemetry raises cpu-saturation/memory-pressure
+    and the RCA can cross-check real load through linux-mcp's PCP tools.
+    The stress unit self-terminates; no recovery timer is needed."""
+    script = STRESS_TEMPLATE.format(
+        duration=cfg.stress_seconds, duty=STRESS_CPU_DUTY, free=STRESS_MEMORY_FREE
+    )
+    payload = base64.b64encode(script.encode()).decode()
+    runner.ssh(
+        vm,
+        f"echo '{payload}' | base64 -d > /tmp/aiops-chaos-stress.py"
+        f" && sudo -n systemd-run --unit={_unit_tag('chaos-stress', vm)}"
+        f" python3 /tmp/aiops-chaos-stress.py",
+        f"drive host CPU and memory to ~90% for {cfg.stress_seconds}s"
+        f" (self-terminating stress unit)",
+    )
+
+
 def scenario_alter_telemetry(vm, runner, cfg):
     values = ZEROS if cfg.alter_mode == "zeros" else SPIKE
     _block_telemetry(vm, runner, cfg, cfg.duration)
@@ -256,6 +324,8 @@ SCENARIOS = [
      "help": "reject VM egress to port 4318 for --telemetry-seconds (default 30)"},
     {"name": "alter-telemetry", "run": scenario_alter_telemetry,
      "help": "block real telemetry and publish fake OTLP values for --duration"},
+    {"name": "stress-host", "run": scenario_stress_host,
+     "help": "drive real host CPU and memory to ~90% for --stress-seconds (default 30)"},
 ]
 SCENARIOS_BY_NAME = {item["name"]: item for item in SCENARIOS}
 
@@ -389,6 +459,7 @@ def main():
                         help="pick a different scenario per VM instead of per round")
     parser.add_argument("--network-seconds", type=int, default=60)
     parser.add_argument("--telemetry-seconds", type=int, default=30)
+    parser.add_argument("--stress-seconds", type=int, default=30)
     parser.add_argument("--duration", type=int, default=60,
                         help="alter-telemetry duration")
     parser.add_argument("--alter-mode", choices=["zeros", "spike", "random"], default="random")
@@ -466,8 +537,8 @@ def main():
 # ---------------------------------------------------------------- self-check
 
 def self_check():
-    if len(SCENARIOS) != 7:
-        raise SystemExit(f"{STEP}: expected 7 scenarios, got {len(SCENARIOS)}")
+    if len(SCENARIOS) != 8:
+        raise SystemExit(f"{STEP}: expected 8 scenarios, got {len(SCENARIOS)}")
     names = [item["name"] for item in SCENARIOS]
     if len(set(names)) != len(names):
         raise SystemExit(f"{STEP}: duplicate scenario names {names}")
@@ -481,6 +552,7 @@ def self_check():
         recover_after = 0
         network_seconds = 60
         telemetry_seconds = 30
+        stress_seconds = 30
         duration = 60
         alter_mode = "zeros"
 
@@ -551,6 +623,22 @@ def self_check():
     spike = record("alter-telemetry", cfg_overrides={"alter_mode": "spike"})
     if "97.5" not in spike.recorded[-1]["detail"]:
         raise SystemExit(f"{STEP}: spike mode wrong: {spike.recorded[-1]}")
+
+    # stress-host ships a self-terminating stress script in a transient unit.
+    stress = record("stress-host")
+    ssh_details = [item["detail"] for item in stress.recorded if item["kind"] == "ssh"]
+    if not ssh_details or "systemd-run" not in ssh_details[0] or "base64 -d" not in ssh_details[0]:
+        raise SystemExit(f"{STEP}: stress-host must use a transient unit: {ssh_details}")
+    payload = ssh_details[0].split("echo '", 1)[1].split("'", 1)[0]
+    script = base64.b64decode(payload).decode()
+    for expected in ("DURATION = 30", "multiprocessing", "MemTotal",
+                     f"DUTY = {STRESS_CPU_DUTY}", f"FREE = {STRESS_MEMORY_FREE}"):
+        if expected not in script:
+            raise SystemExit(f"{STEP}: stress script missing {expected!r}: {script[:200]}")
+    stressed = record("stress-host", cfg_overrides={"stress_seconds": 45})
+    payload = [d for d in (i["detail"] for i in stressed.recorded) if "base64" in d][0]
+    if "DURATION = 45" not in base64.b64decode(payload.split("echo '", 1)[1].split("'", 1)[0]).decode():
+        raise SystemExit(f"{STEP}: stress-host ignores --stress-seconds")
 
     # The OTLP payload must parse with the stage-3 collector and be detectable.
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
