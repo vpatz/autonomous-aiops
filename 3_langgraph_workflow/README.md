@@ -44,6 +44,25 @@ telemetry. No cluster, LLM, or MCP servers required.
 
 ## Local end-to-end with real telemetry
 
+### Agent traces in MLflow
+
+In the cluster, open MLflow → workspace **my-vm-project** → experiment
+**aiops-workflow** → **Traces**. Each graph invocation creates an
+`aiops.workflow` root tagged `aiops.vm`. Expand it to see the detector,
+each RCA iteration, the selector, the executor and any verification/retry
+passes, with timings, routing decisions and final status. Spans do not
+capture raw logs, tool responses, event URLs or credentials.
+
+The workflow uses the MLflow tracing SDK against the internal HTTPS Service,
+the OpenShift service CA and `kubernetes-namespaced` authentication with the
+workflow pod's service account. Outside the cluster, tracing is off unless
+`MLFLOW_TRACKING_URI` is set. To exercise the same instrumented agent code
+without real remediation, run `workflow.py --demo` with a tracking URI and
+experiment configured. App telemetry sent by VMs to port 4318 is separate
+from these agent execution traces.
+
+### Run the collector and service
+
 Run the real collector/workflow against the real demo service, with the
 mock MCP servers standing in for the cluster ones:
 

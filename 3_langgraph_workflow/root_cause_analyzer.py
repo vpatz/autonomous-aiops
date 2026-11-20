@@ -21,6 +21,7 @@ import argparse
 import json
 
 import llm
+import agent_tracing
 import mcp_client
 import state
 
@@ -147,6 +148,7 @@ def _conclude(investigation):
 def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
     """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
+    @agent_tracing.agent(state.NODE_RCA)
     def rca_node(workflow_state):
         from langgraph.types import Command
 

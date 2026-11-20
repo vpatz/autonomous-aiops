@@ -20,6 +20,7 @@ Verify:
 """
 
 import argparse
+import agent_tracing
 
 import anomaly_detector
 import mcp_client
@@ -71,13 +72,17 @@ def run(app, workflow_state, label=None, print_steps=True):
         + workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS))}
     final = None
     seen = 0
-    for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
-        final = snapshot
-        findings = snapshot.get("findings") or []
-        if print_steps:
-            for line in findings[seen:]:
-                print(f"  [{label}] {line}", flush=True)
-        seen = len(findings)
+    with agent_tracing.span("aiops.workflow", {"service": workflow_state["service_name"]},
+                            workflow=True) as output:
+        for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
+            final = snapshot
+            findings = snapshot.get("findings") or []
+            if print_steps:
+                for line in findings[seen:]:
+                    print(f"  [{label}] {line}", flush=True)
+            seen = len(findings)
+        if final:
+            output.update(status=final.get("status"), attempts=final.get("attempts"))
     return final
 
 

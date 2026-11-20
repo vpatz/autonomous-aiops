@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 import llm
+import agent_tracing
 import mcp_client
 import state
 
@@ -152,6 +153,7 @@ def _approved_names(ansible_mcp):
 def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
     """Return the LangGraph node that assembles the approved remediation plan."""
 
+    @agent_tracing.agent(state.NODE_SELECTOR)
     def selector_node(workflow_state):
         from langgraph.types import Command
 
@@ -231,6 +233,7 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
 def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None):
     """Return the LangGraph node that executes the plan and re-verifies."""
 
+    @agent_tracing.agent(state.NODE_EXECUTOR)
     def executor_node(workflow_state):
         from langgraph.types import Command
 

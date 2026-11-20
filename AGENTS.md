@@ -52,8 +52,11 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 
 ## Dependencies (no requirements file at the root)
 
-- Stage 3 has `3_langgraph_workflow/requirements.txt`: `langgraph>=1.0` and
-  `opentelemetry-proto==1.41.1`. The LLM client (`llm.py`, OpenAI-compatible
+- Stage 3 has `3_langgraph_workflow/requirements.txt`; the pod install pins live in
+  `build_pod_manifest.py`. Agent instrumentation (`agent_tracing.py`) uses
+  `mlflow-tracing` and Kubernetes namespaced auth. `MLFLOW_TRACKING_URI`
+  enables it; agent spans go to experiment `aiops-workflow`, not the VM collector.
+  The LLM client (`llm.py`, OpenAI-compatible
   `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) and the MCP client (stdio + streamable HTTP)
   are stdlib-only. A virtualenv is needed locally; nothing is committed.
 - Stage 2 agent scripts need only `opentelemetry-proto`; `analyze_metrics.py`,

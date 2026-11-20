@@ -21,6 +21,7 @@ Verify:
 import argparse
 
 import llm
+import agent_tracing
 import state
 
 STEP = "agent 1 anomaly detector"
@@ -128,6 +129,7 @@ def _llm_summary(service_name, anomaly):
 def build_node(silence_seconds=state.DEFAULT_SILENCE_SECONDS, use_llm=True):
     """Return the LangGraph node for the anomaly detector."""
 
+    @agent_tracing.agent(state.NODE_DETECTOR)
     def detector_node(workflow_state):
         from langgraph.types import Command
 

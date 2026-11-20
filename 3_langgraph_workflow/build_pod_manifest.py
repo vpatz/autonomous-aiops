@@ -21,6 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Every file embedded in the ConfigMap. Keep in sync with the pod volumeMount.
 WORKFLOW_FILES = [
     "state.py",
+    "agent_tracing.py",
     "llm.py",
     "mcp_client.py",
     "mock_mcp_server.py",
@@ -84,6 +85,9 @@ rules:
   - apiGroups: ["kubevirt.io"]
     resources: ["virtualmachines"]
     verbs: ["get", "list"]
+  - apiGroups: ["mlflow.kubeflow.org"]
+    resources: ["experiments"]
+    verbs: ["get", "list", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -156,12 +160,26 @@ spec:
       args:
         - |
           set -euo pipefail
-          pip install --no-cache-dir --target /tmp/pydeps '{LANGGRAPH_PIN}' '{OTEL_PROTO_PIN}'
+          pip install --no-cache-dir --target /tmp/pydeps '{LANGGRAPH_PIN}' '{OTEL_PROTO_PIN}' 'mlflow-tracing==3.17.0' 'kubernetes>=30,<37'
           export PYTHONPATH=/tmp/pydeps
           exec python3 /opt/workflow/workflow.py
       env:
         - name: HOME
           value: /tmp
+        - name: MLFLOW_TRACKING_URI
+          value: https://mlflow.opendatahub.svc:8443/mlflow
+        - name: MLFLOW_TRACKING_AUTH
+          value: kubernetes-namespaced
+        - name: MLFLOW_TRACKING_SERVER_CERT_PATH
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+        - name: MLFLOW_EXPERIMENT_NAME
+          value: aiops-workflow
+        - name: MLFLOW_DISABLE_TELEMETRY
+          value: "true"
+        - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+          value: "5"
+        - name: MLFLOW_HTTP_REQUEST_MAX_RETRIES
+          value: "1"
         - name: LLM_BASE_URL
           valueFrom:
             secretKeyRef:
