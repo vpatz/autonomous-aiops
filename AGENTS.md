@@ -76,11 +76,13 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - The unified dashboard (`render_dashboard_shell` + `dashboard_data` in
   `workflow.py`) is built **only from telemetry and run state** — it never
   queries the Kubernetes API or MCP servers. The page is a static shell that
-  polls `/api/dashboard` (JSON) every 5s and renders per-VM cards with
-  rotating SVG dial gauges (host CPU/memory), a telemetry-freshness bar,
+  polls `/api/dashboard` (JSON) every 5s and renders per-VM cards (two per row)
+  with rotating SVG dial gauges (host CPU/memory), a telemetry-freshness bar,
   restart counts from decreasing `service.uptime` samples (collector records
-  them as `metric_events` with `kind: restart`), plus anomaly/RCA/remediation
-  rows with progress bars. The executor optionally posts the recommended
+  them as `metric_events` with `kind: restart`), anomaly/RCA/remediation
+  rows with progress bars, and a text area of the last 30s of received
+  messages (`TelemetryStore.messages`: one line per OTLP export, SDK-internal
+  metrics filtered out). The executor optionally posts the recommended
   remediation to an EDA event stream when `EDA_EVENT_URL` is set (stage-2
   conventions: basic auth, `aiops-demo` user); the dashboard shows the
   delivery status.

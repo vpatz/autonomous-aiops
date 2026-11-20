@@ -50,6 +50,7 @@ import root_cause_analyzer
 import state
 
 STEP = "aiops workflow"
+DASHBOARD_MESSAGE_SECONDS = 30
 
 
 def build_deps(args, store=None):
@@ -231,6 +232,7 @@ def dashboard_data(store, runs, runs_lock):
                 "logs": len(window.get("logs", [])),
                 "traces": len(window.get("traces", [])),
             },
+            "messages": store.messages(name, DASHBOARD_MESSAGE_SECONDS),
             "service": {
                 "uptime": metrics.get("service.uptime"),
                 "restarts": sum(1 for item in events if item.get("metric") == "service.uptime"),
@@ -280,12 +282,13 @@ def render_dashboard_shell():
       font-family: "Segoe UI", Helvetica, Arial, sans-serif;
     }
     header { padding: 1.4rem 2rem .6rem; display: flex; justify-content: space-between;
-             flex-wrap: wrap; gap: .5rem; max-width: 64rem; margin: 0 auto; }
+             flex-wrap: wrap; gap: .5rem; max-width: 78rem; margin: 0 auto; }
     h1 { margin: 0; font-size: 1.45rem; letter-spacing: .01em; }
     h1 span { color: var(--accent); }
     .stats { color: var(--muted); font-size: .9rem; align-self: baseline; }
-    .grid { display: grid; grid-template-columns: 1fr; gap: 1.1rem;
-            padding: 1rem 2rem 2rem; max-width: 64rem; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.1rem;
+            padding: 1rem 2rem 2rem; max-width: 78rem; margin: 0 auto; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
     .card { background: var(--card); border: 1px solid var(--edge); border-radius: 16px;
             padding: 1rem 1.2rem 1.1rem; box-shadow: 0 14px 34px rgba(0,0,0,.35);
             animation: cardIn .5s cubic-bezier(.2,.7,.3,1) both; }
@@ -321,7 +324,11 @@ def render_dashboard_shell():
     .row .tag { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; width: 5.2rem; flex: none; }
     .row .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .chip { font-size: .72rem; padding: .1rem .5rem; border-radius: 6px; background: rgba(56,189,248,.12); color: var(--accent); white-space: nowrap; }
-    .timeline { padding: .4rem 2rem 3rem; max-width: 64rem; margin: 0 auto; }
+    textarea.messages { width: 100%; resize: none; background: #0b1220; color: #9fb3c8;
+            border: 1px solid var(--edge); border-radius: 8px; padding: .45rem .6rem;
+            margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
+            font-size: .72rem; line-height: 1.35; }
+    .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
     .timeline h2 { font-size: 1rem; color: var(--muted); font-weight: 600; }
     .timeline-item { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: var(--muted);
                      border-left: 2px solid var(--edge); padding: .16rem 0 .16rem .7rem; margin: .18rem 0 .18rem .1rem; }
@@ -509,13 +516,23 @@ def render_dashboard_shell():
       const edaChip = el('span', 'chip', 'EDA: -');
       remRow.appendChild(remText); remRow.appendChild(remWrap); remRow.appendChild(edaChip);
 
+      const msgWrap = el('div', 'kv');
+      msgWrap.appendChild(el('div', 'label', 'last 30s messages'));
+      const msgBox = document.createElement('textarea');
+      msgBox.className = 'messages';
+      msgBox.readOnly = true;
+      msgBox.setAttribute('rows', '6');
+      msgWrap.appendChild(msgBox);
+      root.appendChild(msgWrap);
+
       cardsRoot.appendChild(root);
       return { root: root, status: status, cpu: cpu, mem: mem, uptime: uptime,
                restarts: restarts, signals: signals, fault: fault,
                freshFill: freshFill, freshText: freshText,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
                rcaText: rcaText, rcaFill: rcaFill,
-               remText: remText, remFill: remFill, edaChip: edaChip };
+               remText: remText, remFill: remFill, edaChip: edaChip,
+               msgBox: msgBox };
     }
 
     function setPill(node, cls, text, withDot) {
@@ -580,6 +597,13 @@ def render_dashboard_shell():
       refs.remFill.style.background = result.ok ? 'var(--ok)' : 'var(--warn)';
       const eda = (result.eda || {}).status || 'not configured';
       refs.edaChip.textContent = 'EDA: ' + eda;
+
+      const lines = (svc.messages || []).map(function (m) {
+        return '[' + Math.round(m.age_seconds) + 's ago] ' + m.text;
+      });
+      refs.msgBox.value = lines.length ? lines.join('\n')
+                                       : 'no messages in the last 30s';
+      refs.msgBox.scrollTop = refs.msgBox.scrollHeight;
     }
 
     function update(data) {
@@ -778,6 +802,8 @@ def self_check():
         raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
     if service["service"]["fault"] != 1:
         raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
+    if not service["messages"] or not service["messages"][-1]["text"].startswith("metrics:"):
+        raise SystemExit(f"{STEP}: dashboard data messages missing: {service.get('messages')}")
     if service["run"]["root_cause"]["component"] != "aiops-demo.service":
         raise SystemExit(f"{STEP}: dashboard data rca wrong: {service['run']}")
     if service["run"]["result"]["eda"]["status"] != "not configured":
@@ -787,7 +813,7 @@ def self_check():
     json.dumps(data, default=str)  # must be JSON-serializable
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
-                   "grid-template-columns: 1fr", "cardIn", "animationDelay"):
+                   "repeat(2, 1fr)", "cardIn", "animationDelay", "textarea", "messages"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
 

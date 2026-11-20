@@ -155,6 +155,22 @@ def parse_traces(payload, content_encoding=None, received_at=None):
     return parsed
 
 
+def _short(value):
+    if isinstance(value, float):
+        return f"{value:.1f}"
+    return str(value)
+
+
+def _metrics_message(metrics):
+    """One compact line describing a received metrics export."""
+    parts = []
+    for name, value in sorted(metrics.items()):
+        if name.startswith("otel.sdk"):
+            continue  # SDK-internal queue metrics are noise on a message feed
+        parts.append(f"{name}={_short(value)}")
+    return "metrics: " + (", ".join(parts) or "(empty)")
+
+
 class TelemetryStore:
     """Per-service rolling telemetry buffers with time-window queries."""
 
@@ -171,14 +187,19 @@ class TelemetryStore:
                 "metric_events": deque(maxlen=MAX_PER_SIGNAL),
                 "logs": deque(maxlen=MAX_PER_SIGNAL),
                 "traces": deque(maxlen=MAX_PER_SIGNAL),
+                "messages": deque(maxlen=MAX_PER_SIGNAL),
             }
         return self._services[service_name]
+
+    def _message(self, entry, text, received_at):
+        entry["messages"].append({"text": text, "at": received_at})
 
     def record_metrics(self, parsed):
         with self._lock:
             for service_name, metrics, received_at in parsed:
                 entry = self._entry(service_name)
                 entry["last_seen"] = max(entry["last_seen"], received_at)
+                self._message(entry, _metrics_message(metrics), received_at)
                 for name, value in metrics.items():
                     previous = entry["metrics"].get(name, {}).get("value")
                     entry["metrics"][name] = {"value": value, "at": received_at}
@@ -201,6 +222,9 @@ class TelemetryStore:
                 entry = self._entry(service_name)
                 entry["last_seen"] = max(entry["last_seen"], received_at)
                 entry["logs"].extend(entries)
+                for item in entries:
+                    severity = item.get("severity_text") or f"sev{item.get('severity_number', 0)}"
+                    self._message(entry, f"log {severity}: {item.get('body', '')}", received_at)
 
     def record_traces(self, parsed):
         with self._lock:
@@ -208,6 +232,27 @@ class TelemetryStore:
                 entry = self._entry(service_name)
                 entry["last_seen"] = max(entry["last_seen"], received_at)
                 entry["traces"].extend(spans)
+                for span in spans:
+                    status = {0: "unset", 1: "ok", 2: "error"}.get(span["status_code"], "?")
+                    self._message(
+                        entry,
+                        f"span {span['name']}: status={status} {span['duration_ms']}ms",
+                        received_at,
+                    )
+
+    def messages(self, service_name, seconds=30):
+        """The last `seconds` of received-message lines for one service."""
+        now = time.monotonic()
+        cutoff = now - max(0, seconds)
+        with self._lock:
+            entry = self._services.get(service_name)
+            if entry is None:
+                return []
+            return [
+                {"age_seconds": round(now - item["at"], 1), "text": item["text"]}
+                for item in entry["messages"]
+                if item["at"] >= cutoff
+            ]
 
     def services(self):
         with self._lock:
@@ -551,6 +596,23 @@ def self_check():
         raise SystemExit(f"{STEP}: uptime reset not recorded as a restart: {events}")
     if store.window("vm-1", 60).get("observed_for_seconds") is None:
         raise SystemExit(f"{STEP}: window missing observed_for_seconds")
+    # The message feed: one line per received export, filtered by age.
+    msgs = store.messages("vm-1", 60)
+    if not msgs or not any(m["text"].startswith("metrics:") and "service.uptime" in m["text"]
+                           for m in msgs):
+        raise SystemExit(f"{STEP}: metrics message missing: {msgs[:3]}")
+    if not any(m["text"].startswith("log ERROR:") for m in msgs):
+        raise SystemExit(f"{STEP}: log message missing: {msgs[:3]}")
+    if not any(m["text"].startswith("span dummy-crash:") and "status=error" in m["text"]
+               for m in msgs):
+        raise SystemExit(f"{STEP}: span message missing: {msgs[:3]}")
+    if any("otel.sdk" in m["text"] for m in msgs):
+        raise SystemExit(f"{STEP}: sdk-internal metrics leak into the feed: {msgs[:3]}")
+    recent = store.messages("vm-1", 6)
+    if len(recent) != 1 or "service.uptime=3.0" not in recent[0]["text"]:
+        raise SystemExit(f"{STEP}: message age filter wrong: {recent}")
+    if store.messages("never-seen", 60):
+        raise SystemExit(f"{STEP}: unknown service must have no messages")
     print(f"{STEP}: self-check ok", flush=True)
 
 
