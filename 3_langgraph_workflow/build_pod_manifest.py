@@ -187,11 +187,14 @@ spec:
         - name: ANSIBLE_MCP_COMMAND
           value: "python3 /opt/workflow/mock_mcp_server.py --role ansible"
         - name: EDA_EVENT_URL
-          value: ""
+          valueFrom:
+            secretKeyRef: {{name: eda-config, key: EDA_EVENT_URL, optional: true}}
         - name: EDA_EVENT_USERNAME
-          value: "aiops-demo"
+          valueFrom:
+            secretKeyRef: {{name: eda-config, key: EDA_EVENT_USERNAME, optional: true}}
         - name: EDA_EVENT_PASSWORD
-          value: ""
+          valueFrom:
+            secretKeyRef: {{name: eda-config, key: EDA_EVENT_PASSWORD, optional: true}}
         - name: MCP_INSECURE_TLS
           value: "1"
         - name: WINDOW_SECONDS

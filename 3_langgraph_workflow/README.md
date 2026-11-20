@@ -84,11 +84,32 @@ analysis. VMs send telemetry to `aiops-workflow.my-vm-project.svc.cluster.local:
 
 By default the pod runs the **mock** Ansible MCP server in-process
 (`ANSIBLE_MCP_COMMAND`) so the full remediation loop works out of the box;
-set `ANSIBLE_MCP_URL` to a real Ansible MCP server to override it. To also
-deliver the recommended remediation to Ansible through an EDA event stream,
-set `EDA_EVENT_URL` (plus `EDA_EVENT_USERNAME`/`EDA_EVENT_PASSWORD`); the
-executor posts the plan and root cause there and the dashboard shows the
-delivery status.
+set `ANSIBLE_MCP_URL` to a real Ansible MCP server to override it.
+
+### Dispatch to in-cluster Event-Driven Ansible
+
+In AAP, select the **Basic-auth event stream** attached to the restart rulebook
+activation. Use its full HTTPS POST URL from the AAP gateway, not the EDA
+management API or the bare `aap-eda-event-stream` Service. The activation
+must match `action: restart`, use `service` to select the inventory host,
+and launch the approved job for `aiops-demo.service`.
+
+Put `EDA_EVENT_URL`, `EDA_EVENT_USERNAME` and `EDA_EVENT_PASSWORD` in a private
+env file outside the checkout (`KEY=value`, one per line), then run:
+
+```sh
+oc create secret generic eda-config -n my-vm-project \
+  --from-env-file="$HOME/.config/aiops/eda.env" --dry-run=client -o yaml |
+  oc apply --server-side -f -
+oc delete pod aiops-workflow -n my-vm-project --ignore-not-found
+oc apply -f 3_langgraph_workflow/workflow-pod.yaml
+```
+
+With `EDA_EVENT_URL` set, EDA replaces MCP execution: the agent dispatches
+only the fixed restart action for a high-confidence diagnosis of the demo
+unit on a VM in `DASHBOARD_VMS`. The dashboard distinguishes event acceptance
+from telemetry verification. Check the activation's event history and the
+controller job history to confirm the rulebook ran the job.
 
 ### Integrating an LLM
 

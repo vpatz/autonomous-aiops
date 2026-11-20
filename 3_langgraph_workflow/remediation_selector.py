@@ -66,23 +66,26 @@ def build_eda_request(payload, username, password):
 
 
 def post_eda_event(payload):
-    """Best-effort delivery of the recommended remediation to the EDA event
-    stream (set EDA_EVENT_URL to enable; mirrors the stage-2 conventions)."""
+    """Dispatch to the Basic-auth AAP event stream. Never publish its URL in findings."""
     url = os.environ.get("EDA_EVENT_URL", "").strip()
     if not url:
         return {"status": "not configured"}
     username = os.environ.get("EDA_EVENT_USERNAME", "aiops-demo")
     password = os.environ.get("EDA_EVENT_PASSWORD", "")
-    request = build_eda_request(payload, username, password)
-    import ssl
-
+    if not url.startswith("https://") or not username or not password:
+        return {"ok": False, "status": "requires HTTPS and event-stream credentials"}
     try:
-        with urllib.request.urlopen(
-            request, timeout=15, context=ssl._create_unverified_context()
-        ) as response:
-            return {"status": f"sent HTTP {response.status}", "url": url}
-    except (OSError, urllib.error.URLError) as exc:
-        return {"status": f"failed: {str(exc)[:120]}", "url": url}
+        request = build_eda_request(payload, username, password)
+        # A redirect is not an acknowledgement (and must not forward Basic auth).
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args):
+                return None
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
+            return {"ok": 200 <= response.status < 300, "status": f"accepted HTTP {response.status}"}
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "status": f"rejected HTTP {exc.code}"}
+    except (OSError, ValueError):
+        return {"ok": False, "status": "event-stream connection failed"}
 
 
 def _approved_plan(root_cause, tools, service_name):
@@ -146,7 +149,7 @@ def _approved_names(ansible_mcp):
         return []
 
 
-def build_selector_node(ansible_mcp=None, use_llm=True):
+def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
     """Return the LangGraph node that assembles the approved remediation plan."""
 
     def selector_node(workflow_state):
@@ -154,6 +157,19 @@ def build_selector_node(ansible_mcp=None, use_llm=True):
 
         service_name = workflow_state["service_name"]
         root_cause = workflow_state.get("root_cause", {})
+        if eda:
+            # This stream's rulebook contract is a restart of the demo unit.
+            # It is not an arbitrary Ansible module or shell execution endpoint.
+            if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
+                    or root_cause.get("component") != SERVICE_UNIT
+                    or root_cause.get("confidence") != "high"):
+                return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                    "findings": [f"[{STEP}] no matching approved EDA restart action"]})
+            return Command(goto=state.NODE_EXECUTOR, update={
+                "status": state.STATUS_REMEDIATING,
+                "remediation": {"approved_tools": ["restart_service"], "plan": [
+                    {"tool": "restart_service", "arguments": {"service": SERVICE_UNIT}}]},
+                "findings": [f"[{STEP}] request EDA restart of {SERVICE_UNIT} on {service_name}"]})
         approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
         tools = [{"name": name} for name in approved]
 
@@ -209,7 +225,7 @@ def build_selector_node(ansible_mcp=None, use_llm=True):
     return selector_node
 
 
-def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30):
+def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None):
     """Return the LangGraph node that executes the plan and re-verifies."""
 
     def executor_node(workflow_state):
@@ -224,7 +240,14 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
 
         results = []
         ok = True
-        for step in plan:
+        if deliver is not None:
+            eda_record = deliver(build_eda_payload("restart", service_name, plan,
+                                                   workflow_state.get("root_cause", {})))
+            ok = eda_record.get("ok", False)
+            results.append({"step": plan[0], "ok": ok, "output": eda_record["status"]})
+        else:
+            eda_record = {"status": "not configured"}
+        for step in ([] if deliver is not None else plan):
             tool = step.get("tool", "")
             if tool not in approved:
                 results.append({"step": step, "ok": False, "output": "unapproved tool"})
@@ -245,18 +268,13 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         ]
         update = {
             "attempts": attempts,
-            "remediation_result": {"steps": results, "ok": ok, "attempts": attempts},
+            "remediation_result": {"steps": results, "ok": ok, "attempts": attempts, "eda": eda_record},
             "findings": findings,
         }
         if not ok:
             update["status"] = state.STATUS_FAILED
             return Command(goto="__end__", update=update)
 
-        # Deliver the recommended remediation to Ansible through the EDA
-        # event stream (no-op unless EDA_EVENT_URL is configured).
-        root_cause = workflow_state.get("root_cause", {})
-        eda_record = post_eda_event(build_eda_payload("restart", service_name, plan, root_cause))
-        update["remediation_result"]["eda"] = eda_record
         findings.append(f"[{STEP} executor] EDA delivery: {eda_record['status']}")
 
         # Outer loop: verify against telemetry received after the remediation.
@@ -370,6 +388,25 @@ def self_check():
     result = executor(workflow_state)
     if result.goto != "__end__" or result.update["status"] != state.STATUS_FAILED:
         raise SystemExit(f"{STEP}: failed execution should stop, got {result.goto}")
+
+    # EDA dispatch is exclusive: no MCP client and no real POST in self-checks.
+    from unittest.mock import patch
+    events = []
+    with patch.dict(os.environ, {"DASHBOARD_VMS": "vm-1"}):
+        select = build_selector_node(eda=True)
+        selected = select(workflow_state)
+        assert selected.goto == state.NODE_EXECUTOR
+        assert select({**workflow_state, "service_name": "other"}).goto == "__end__"
+    workflow_state.update(selected.update)
+    def accept(payload):
+        events.append(payload)
+        return {"ok": True, "status": "accepted HTTP 202"}
+    dispatched = build_executor_node(get_window=get_window, verify_wait_seconds=0,
+                                     deliver=accept)(workflow_state)
+    assert dispatched.goto == state.NODE_DETECTOR
+    assert len(events) == 1 and events[0]["service"] == "vm-1" and events[0]["action"] == "restart"
+    rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
+    assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 
     # EDA delivery: off without EDA_EVENT_URL; payload and request buildable.
     saved = {key: os.environ.get(key) for key in

@@ -128,7 +128,8 @@ def build_deps(args, store=None):
         return mcp_client.from_env(prefix, insecure=insecure)
 
     linux = client_for("LINUX", getattr(args, "linux_mcp_url", None), getattr(args, "linux_mcp_command", None))
-    ansible = client_for("ANSIBLE", getattr(args, "ansible_mcp_url", None), getattr(args, "ansible_mcp_command", None))
+    deliver = remediation_selector.post_eda_event if os.environ.get("EDA_EVENT_URL", "").strip() else None
+    ansible = None if deliver else client_for("ANSIBLE", getattr(args, "ansible_mcp_url", None), getattr(args, "ansible_mcp_command", None))
 
     get_window = None
     if store is not None:
@@ -142,6 +143,7 @@ def build_deps(args, store=None):
         use_llm=True,
         silence_seconds=args.silence_seconds,
         verify_wait_seconds=args.verify_wait_seconds,
+        deliver=deliver,
     )
     return app, linux, ansible
 
@@ -680,7 +682,8 @@ def render_dashboard_shell():
       const result = run.result || {};
       const plan = run.plan || [];
       const step = plan.length ? plan[0].tool + ' ' + ((plan[0].arguments || {}).module || '') : 'none';
-      refs.remText.textContent = step + ' · ' + (result.ok ? 'executed ok' : (result.steps ? 'failed' : 'pending'));
+      const accepted = result.eda && result.eda.ok;
+      refs.remText.textContent = step + ' · ' + (accepted ? 'event accepted' : (result.ok ? 'executed ok' : (result.steps ? 'failed' : 'pending')));
       const attemptPct = Math.min(100, (run.attempts / Math.max(1, run.max_attempts)) * 100);
       refs.remFill.style.width = attemptPct + '%';
       refs.remFill.style.background = result.ok ? 'var(--ok)' : 'var(--warn)';

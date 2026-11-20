@@ -36,6 +36,7 @@ def build_graph(
     use_llm=True,
     silence_seconds=state.DEFAULT_SILENCE_SECONDS,
     verify_wait_seconds=state.DEFAULT_VERIFY_WAIT_SECONDS,
+    deliver=None,
 ):
     """Compile the workflow graph. Dependencies are injected for testability:
     real MCP clients and live windows in production, fakes in self-checks."""
@@ -47,9 +48,10 @@ def build_graph(
     graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
         linux_mcp=linux_mcp, use_llm=use_llm))
     graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
-        ansible_mcp=ansible_mcp, use_llm=use_llm))
+        ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None))
     graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
-        ansible_mcp=ansible_mcp, get_window=get_window, verify_wait_seconds=verify_wait_seconds))
+        ansible_mcp=ansible_mcp, get_window=get_window, verify_wait_seconds=verify_wait_seconds,
+        deliver=deliver))
     graph.add_edge(START, state.NODE_DETECTOR)
     # All other routing is dynamic: nodes return Command(goto=...), including
     # Command(goto=END) to finish.
