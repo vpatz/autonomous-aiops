@@ -1,0 +1,18 @@
+---
+- name: Remediate a stopped AIOps demo service
+  hosts: all
+  sources:
+    - name: aiops_events
+      ansible.eda.webhook:
+        port: 5000
+  rules:
+    - name: Start the requested demo service
+      condition: >-
+        event.payload.action == "restart" and
+        event.payload.service in ["rhel10-service-1", "rhel10-service-2", "rhel10-service-3", "rhel10-service-4"]
+      action:
+        run_job_template:
+          name: AIOps - restore demo service
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.service }}"

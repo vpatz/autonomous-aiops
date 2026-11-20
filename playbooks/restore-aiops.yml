@@ -1,0 +1,17 @@
+---
+- name: Restore the stopped demo service on one VM
+  hosts: aiops_vms
+  gather_facts: false
+  pre_tasks:
+    - name: Require a limit that selects exactly one demo VM
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - ansible_limit | default('') == inventory_hostname
+          - inventory_hostname in ['rhel10-service-1', 'rhel10-service-2', 'rhel10-service-3', 'rhel10-service-4']
+  tasks:
+    - name: Ensure the demo service is running (duplicate events are harmless)
+      become: true
+      ansible.builtin.systemd_service:
+        name: aiops-demo.service
+        state: started
