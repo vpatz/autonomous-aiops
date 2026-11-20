@@ -1,0 +1,42 @@
+---
+- name: Restore one stopped KubeVirt demo VM from the controller execution pod
+  hosts: aiops_vms
+  connection: local
+  gather_facts: false
+  vars:
+    api: https://kubernetes.default.svc
+    namespace: my-vm-project
+    sa_dir: /var/run/secrets/kubernetes.io/serviceaccount
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ sa_dir }}/ca.crt"
+      follow_redirects: none
+      headers:
+        Authorization: "Bearer {{ lookup('ansible.builtin.file', sa_dir + '/token') }}"
+  tasks:
+    - name: Require exactly one allowlisted VM
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - ansible_limit | default('') == inventory_hostname
+          - inventory_hostname in ['rhel10-service-1', 'rhel10-service-2', 'rhel10-service-3', 'rhel10-service-4']
+    - name: Check VM power state and wait for any shutdown to finish
+      ansible.builtin.uri:
+        url: "{{ api }}/apis/kubevirt.io/v1/namespaces/{{ namespace }}/virtualmachines/{{ inventory_hostname }}"
+      register: vm
+      until: vm.status == 200 and vm.json.status.printableStatus != 'Stopping'
+      retries: 60
+      delay: 3
+      no_log: true
+    - name: Start only a halted VM (duplicate or delayed events are no-ops)
+      ansible.builtin.uri:
+        url: "{{ api }}/apis/subresources.kubevirt.io/v1/namespaces/{{ namespace }}/virtualmachines/{{ inventory_hostname }}/start"
+        method: PUT
+        body_format: json
+        body: {}
+        status_code: [200, 202]
+      when:
+        - vm.json.status.printableStatus == 'Stopped'
+        - vm.json.spec.running | default(true) == false or vm.json.spec.runStrategy | default('') == 'Halted'
+      changed_when: true
+      no_log: true

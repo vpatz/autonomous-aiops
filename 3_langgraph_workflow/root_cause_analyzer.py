@@ -144,7 +144,7 @@ def _conclude(investigation):
     }
 
 
-def build_node(linux_mcp=None, use_llm=True):
+def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
     """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
     def rca_node(workflow_state):
@@ -155,6 +155,14 @@ def build_node(linux_mcp=None, use_llm=True):
         service_name = workflow_state["service_name"]
         anomaly = workflow_state.get("anomaly", {})
         investigation = list(workflow_state.get("investigation", []))
+        if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
+                and is_vm_halted(service_name)):
+            summary = f"KubeVirt reports {service_name} is configured to stop; guest telemetry is silent."
+            return Command(goto=state.NODE_SELECTOR, update={
+                "iteration": iteration, "vm_halted": True,
+                "root_cause": {"component": "VirtualMachine", "confidence": "high",
+                               "summary": summary, "found": True},
+                "findings": [f"[{STEP}] {summary}"]})
 
         tools = []
         if linux_mcp is not None:
@@ -245,6 +253,7 @@ def build_node(linux_mcp=None, use_llm=True):
             update={
                 "iteration": iteration,
                 "root_cause": root_cause,
+                "vm_halted": False,
                 "findings": [finding],
             },
         )

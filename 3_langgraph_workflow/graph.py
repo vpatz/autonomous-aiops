@@ -37,6 +37,7 @@ def build_graph(
     silence_seconds=state.DEFAULT_SILENCE_SECONDS,
     verify_wait_seconds=state.DEFAULT_VERIFY_WAIT_SECONDS,
     deliver=None,
+    is_vm_halted=None,
 ):
     """Compile the workflow graph. Dependencies are injected for testability:
     real MCP clients and live windows in production, fakes in self-checks."""
@@ -46,7 +47,7 @@ def build_graph(
     graph.add_node(state.NODE_DETECTOR, anomaly_detector.build_node(
         silence_seconds=silence_seconds, use_llm=use_llm))
     graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-        linux_mcp=linux_mcp, use_llm=use_llm))
+        linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted))
     graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
         ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None))
     graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(

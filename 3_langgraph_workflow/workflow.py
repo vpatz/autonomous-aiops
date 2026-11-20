@@ -144,8 +144,24 @@ def build_deps(args, store=None):
         silence_seconds=args.silence_seconds,
         verify_wait_seconds=args.verify_wait_seconds,
         deliver=deliver,
+        is_vm_halted=confirmed_halted if deliver else None,
     )
     return app, linux, ansible
+
+
+def confirmed_halted(name):
+    """Check fresh KubeVirt desired power state; an SSH timeout is not evidence."""
+    if name not in os.environ.get("DASHBOARD_VMS", "").split():
+        return False
+    try:
+        items = _kube_vm_items(_namespace())
+    except (OSError, ValueError, TimeoutError):
+        return False
+    for item in items:
+        if item["metadata"]["name"] == name and not item["metadata"].get("deletionTimestamp"):
+            spec = item["spec"]
+            return spec.get("running") is False or spec.get("runStrategy") == "Halted"
+    return False
 
 
 def close_clients(*clients):

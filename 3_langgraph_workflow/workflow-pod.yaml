@@ -59,6 +59,7 @@ data:
         anomaly: dict
         investigation: Annotated[list, operator.add]
         root_cause: dict
+        vm_halted: bool
         remediation: dict
         remediation_result: dict
         findings: Annotated[list, operator.add]
@@ -2049,7 +2050,7 @@ data:
         }
 
 
-    def build_node(linux_mcp=None, use_llm=True):
+    def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
         """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
         def rca_node(workflow_state):
@@ -2060,6 +2061,14 @@ data:
             service_name = workflow_state["service_name"]
             anomaly = workflow_state.get("anomaly", {})
             investigation = list(workflow_state.get("investigation", []))
+            if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
+                    and is_vm_halted(service_name)):
+                summary = f"KubeVirt reports {service_name} is configured to stop; guest telemetry is silent."
+                return Command(goto=state.NODE_SELECTOR, update={
+                    "iteration": iteration, "vm_halted": True,
+                    "root_cause": {"component": "VirtualMachine", "confidence": "high",
+                                   "summary": summary, "found": True},
+                    "findings": [f"[{STEP}] {summary}"]})
 
             tools = []
             if linux_mcp is not None:
@@ -2150,6 +2159,7 @@ data:
                 update={
                     "iteration": iteration,
                     "root_cause": root_cause,
+                    "vm_halted": False,
                     "findings": [finding],
                 },
             )
@@ -2452,16 +2462,19 @@ data:
             if eda:
                 # This stream's rulebook contract is a restart of the demo unit.
                 # It is not an arbitrary Ansible module or shell execution endpoint.
+                vm_restart = workflow_state.get("vm_halted") is True
+                component = "VirtualMachine" if vm_restart else SERVICE_UNIT
                 if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
-                        or root_cause.get("component") != SERVICE_UNIT
+                        or root_cause.get("component") != component
                         or root_cause.get("confidence") != "high"):
                     return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                         "findings": [f"[{STEP}] no matching approved EDA restart action"]})
+                tool = "restart_vm" if vm_restart else "restart_service"
                 return Command(goto=state.NODE_EXECUTOR, update={
                     "status": state.STATUS_REMEDIATING,
-                    "remediation": {"approved_tools": ["restart_service"], "plan": [
-                        {"tool": "restart_service", "arguments": {"service": SERVICE_UNIT}}]},
-                    "findings": [f"[{STEP}] request EDA restart of {SERVICE_UNIT} on {service_name}"]})
+                    "remediation": {"approved_tools": [tool], "plan": [
+                        {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
+                    "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
             approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
             tools = [{"name": name} for name in approved]
 
@@ -2532,8 +2545,9 @@ data:
 
             results = []
             ok = True
+            vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
             if deliver is not None:
-                eda_record = deliver(build_eda_payload("restart", service_name, plan,
+                eda_record = deliver(build_eda_payload("restart_vm" if vm_restart else "restart", service_name, plan,
                                                        workflow_state.get("root_cause", {})))
                 ok = eda_record.get("ok", False)
                 results.append({"step": plan[0], "ok": ok, "output": eda_record["status"]})
@@ -2574,7 +2588,7 @@ data:
             telemetry = workflow_state.get("telemetry", {})
             if get_window is not None:
                 telemetry = get_window(service_name, window_seconds, since=verify_since)
-                deadline = time.monotonic() + max(0, verify_wait_seconds)
+                deadline = time.monotonic() + max(240 if vm_restart else 0, verify_wait_seconds)
                 while time.monotonic() < deadline:
                     if telemetry.get("metrics"):
                         break  # fresh post-remediation telemetry is arriving
@@ -2697,6 +2711,15 @@ data:
                                          deliver=accept)(workflow_state)
         assert dispatched.goto == state.NODE_DETECTOR
         assert len(events) == 1 and events[0]["service"] == "vm-1" and events[0]["action"] == "restart"
+        with patch.dict(os.environ, {"DASHBOARD_VMS": "vm-1"}):
+            vm_case = {**workflow_state, "root_cause": {"component": "VirtualMachine",
+                       "confidence": "high"}}
+            assert select(vm_case).goto == "__end__"  # an LLM diagnosis alone is insufficient
+            vm_case["vm_halted"] = True
+            vm_case.update(select(vm_case).update)
+            assert vm_case["remediation"]["plan"][0]["tool"] == "restart_vm"
+            build_executor_node(get_window=get_window, deliver=accept)(vm_case)
+            assert events[-1]["action"] == "restart_vm"
         rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
         assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 
@@ -2784,6 +2807,7 @@ data:
         silence_seconds=state.DEFAULT_SILENCE_SECONDS,
         verify_wait_seconds=state.DEFAULT_VERIFY_WAIT_SECONDS,
         deliver=None,
+        is_vm_halted=None,
     ):
         """Compile the workflow graph. Dependencies are injected for testability:
         real MCP clients and live windows in production, fakes in self-checks."""
@@ -2793,7 +2817,7 @@ data:
         graph.add_node(state.NODE_DETECTOR, anomaly_detector.build_node(
             silence_seconds=silence_seconds, use_llm=use_llm))
         graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-            linux_mcp=linux_mcp, use_llm=use_llm))
+            linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted))
         graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
             ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None))
         graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
@@ -3085,8 +3109,24 @@ data:
             silence_seconds=args.silence_seconds,
             verify_wait_seconds=args.verify_wait_seconds,
             deliver=deliver,
+            is_vm_halted=confirmed_halted if deliver else None,
         )
         return app, linux, ansible
+
+
+    def confirmed_halted(name):
+        """Check fresh KubeVirt desired power state; an SSH timeout is not evidence."""
+        if name not in os.environ.get("DASHBOARD_VMS", "").split():
+            return False
+        try:
+            items = _kube_vm_items(_namespace())
+        except (OSError, ValueError, TimeoutError):
+            return False
+        for item in items:
+            if item["metadata"]["name"] == name and not item["metadata"].get("deletionTimestamp"):
+                spec = item["spec"]
+                return spec.get("running") is False or spec.get("runStrategy") == "Halted"
+        return False
 
 
     def close_clients(*clients):

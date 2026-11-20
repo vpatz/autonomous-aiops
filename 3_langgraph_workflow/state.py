@@ -52,6 +52,7 @@ class WorkflowState(TypedDict, total=False):
     anomaly: dict
     investigation: Annotated[list, operator.add]
     root_cause: dict
+    vm_halted: bool
     remediation: dict
     remediation_result: dict
     findings: Annotated[list, operator.add]

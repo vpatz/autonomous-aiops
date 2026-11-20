@@ -160,16 +160,19 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
         if eda:
             # This stream's rulebook contract is a restart of the demo unit.
             # It is not an arbitrary Ansible module or shell execution endpoint.
+            vm_restart = workflow_state.get("vm_halted") is True
+            component = "VirtualMachine" if vm_restart else SERVICE_UNIT
             if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
-                    or root_cause.get("component") != SERVICE_UNIT
+                    or root_cause.get("component") != component
                     or root_cause.get("confidence") != "high"):
                 return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                     "findings": [f"[{STEP}] no matching approved EDA restart action"]})
+            tool = "restart_vm" if vm_restart else "restart_service"
             return Command(goto=state.NODE_EXECUTOR, update={
                 "status": state.STATUS_REMEDIATING,
-                "remediation": {"approved_tools": ["restart_service"], "plan": [
-                    {"tool": "restart_service", "arguments": {"service": SERVICE_UNIT}}]},
-                "findings": [f"[{STEP}] request EDA restart of {SERVICE_UNIT} on {service_name}"]})
+                "remediation": {"approved_tools": [tool], "plan": [
+                    {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
+                "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
         approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
         tools = [{"name": name} for name in approved]
 
@@ -240,8 +243,9 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
 
         results = []
         ok = True
+        vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
         if deliver is not None:
-            eda_record = deliver(build_eda_payload("restart", service_name, plan,
+            eda_record = deliver(build_eda_payload("restart_vm" if vm_restart else "restart", service_name, plan,
                                                    workflow_state.get("root_cause", {})))
             ok = eda_record.get("ok", False)
             results.append({"step": plan[0], "ok": ok, "output": eda_record["status"]})
@@ -282,7 +286,7 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         telemetry = workflow_state.get("telemetry", {})
         if get_window is not None:
             telemetry = get_window(service_name, window_seconds, since=verify_since)
-            deadline = time.monotonic() + max(0, verify_wait_seconds)
+            deadline = time.monotonic() + max(240 if vm_restart else 0, verify_wait_seconds)
             while time.monotonic() < deadline:
                 if telemetry.get("metrics"):
                     break  # fresh post-remediation telemetry is arriving
@@ -405,6 +409,15 @@ def self_check():
                                      deliver=accept)(workflow_state)
     assert dispatched.goto == state.NODE_DETECTOR
     assert len(events) == 1 and events[0]["service"] == "vm-1" and events[0]["action"] == "restart"
+    with patch.dict(os.environ, {"DASHBOARD_VMS": "vm-1"}):
+        vm_case = {**workflow_state, "root_cause": {"component": "VirtualMachine",
+                   "confidence": "high"}}
+        assert select(vm_case).goto == "__end__"  # an LLM diagnosis alone is insufficient
+        vm_case["vm_halted"] = True
+        vm_case.update(select(vm_case).update)
+        assert vm_case["remediation"]["plan"][0]["tool"] == "restart_vm"
+        build_executor_node(get_window=get_window, deliver=accept)(vm_case)
+        assert events[-1]["action"] == "restart_vm"
     rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
     assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 

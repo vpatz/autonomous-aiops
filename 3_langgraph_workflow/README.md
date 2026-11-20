@@ -111,6 +111,21 @@ unit on a VM in `DASHBOARD_VMS`. The dashboard distinguishes event acceptance
 from telemetry verification. Check the activation's event history and the
 controller job history to confirm the rulebook ran the job.
 
+The same activation also handles `action: restart_vm`. For silent telemetry the
+RCA checks the named demo VM's current KubeVirt spec. Only `running: false`
+or `runStrategy: Halted` selects VM recovery. The workflow allows four minutes
+for fresh telemetry after dispatch. In this demo an intentional shutdown of
+an observed demo VM is therefore treated as a fault while the workflow is active.
+
+The `AIOps - restore stopped VM` controller template uses `playbooks/restore-vm.yml`,
+the existing demo inventory, and **Prompt on launch** for the host limit. It
+runs locally in a dedicated AAP container group with service account
+`aiops-vm-recovery` and `automountServiceAccountToken: true`; no guest SSH
+credential is needed. Apply `playbooks/vm-recovery-rbac.yaml` to authorize
+only reading and starting the four named VMs. The launcher needs Execute on
+this template. Sync both AAP projects and refresh the activation after changing
+the rulebook. A delayed or repeated event does not reboot an already running VM.
+
 ### Integrating an LLM
 
 Every agent uses an OpenAI-compatible endpoint when configured, and falls
