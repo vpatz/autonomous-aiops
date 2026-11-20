@@ -6,13 +6,12 @@
   vars:
     api: https://kubernetes.default.svc
     namespace: my-vm-project
-    sa_dir: /var/run/secrets/kubernetes.io/serviceaccount
   module_defaults:
     ansible.builtin.uri:
-      ca_path: "{{ sa_dir }}/ca.crt"
+      ca_path: "{{ lookup('ansible.builtin.env', 'AIOPS_VM_CA_FILE') }}"
       follow_redirects: none
       headers:
-        Authorization: "Bearer {{ lookup('ansible.builtin.file', sa_dir + '/token') }}"
+        Authorization: "Bearer {{ lookup('ansible.builtin.env', 'AIOPS_VM_TOKEN') }}"
   tasks:
     - name: Require exactly one allowlisted VM
       ansible.builtin.assert:

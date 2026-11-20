@@ -119,10 +119,13 @@ an observed demo VM is therefore treated as a fault while the workflow is active
 
 The `AIOps - restore stopped VM` controller template uses `playbooks/restore-vm.yml`,
 the existing demo inventory, and **Prompt on launch** for the host limit. It
-runs locally in a dedicated AAP container group with service account
-`aiops-vm-recovery` and `automountServiceAccountToken: true`; no guest SSH
-credential is needed. Apply `playbooks/vm-recovery-rbac.yaml` to authorize
-only reading and starting the four named VMs. The launcher needs Execute on
+runs locally in the execution pod with an encrypted template credential,
+not guest SSH. Apply `playbooks/vm-recovery-rbac.yaml` to authorize only
+reading and starting the four named VMs. Populate the controller credential
+from the operator-generated `aap/aiops-vm-recovery-token` Secret: inject
+`token` as `AIOPS_VM_TOKEN` and `ca.crt` as a temporary PEM file whose path is
+`AIOPS_VM_CA_FILE`. To rotate, recreate that token Secret and update the
+controller credential. The launcher needs Execute on
 this template. Sync both AAP projects and refresh the activation after changing
 the rulebook. A delayed or repeated event does not reboot an already running VM.
 
