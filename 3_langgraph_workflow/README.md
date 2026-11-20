@@ -107,7 +107,19 @@ python3 3_langgraph_workflow/workflow.py --demo  # LLM-driven agents
 
 On the cluster, credentials never go in git: the pod reads them from an
 (optional) `llm-config` Secret, so a missing secret simply means heuristic
-fallback:
+fallback. `set_secrets_in_cluster.sh` does all of this (it sources a local,
+gitignored `set_secrets_in_shell.sh` holding the values, or reads them from
+the environment):
+
+```sh
+# set_secrets_in_shell.sh (gitignored):
+#   export LLM_BASE_URL='https://<llm-host>/v1'
+#   export LLM_MODEL='<model>'
+#   export LLM_API_KEY='<token>'
+./set_secrets_in_cluster.sh     # creates llm-config + recreates the pod
+```
+
+Equivalently, manually:
 
 ```sh
 oc create secret generic llm-config -n my-vm-project \

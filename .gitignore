@@ -1,4 +1,4 @@
 __pycache__/
 *.pyc
 .venv/
-setup_secrets_in_cluster.sh
+set_secrets_in_shell.sh
