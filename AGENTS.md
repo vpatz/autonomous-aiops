@@ -83,7 +83,9 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   `metric_events` with `kind: restart`), anomaly/RCA/remediation rows with
   progress bars, and a text area of the last 30s of received
   messages (`TelemetryStore.messages`: one line per OTLP export, SDK-internal
-  metrics filtered out). The executor optionally posts the recommended
+  metrics filtered out). A textbox at the bottom shows all agents' output
+  across VMs (from the run `findings` channel, newest last). The executor
+  optionally posts the recommended
   remediation to an EDA event stream when `EDA_EVENT_URL` is set (stage-2
   conventions: basic auth, `aiops-demo` user); the dashboard shows the
   delivery status.

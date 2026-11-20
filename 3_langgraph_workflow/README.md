@@ -161,8 +161,9 @@ its EDA delivery chip — and a text area showing the last 30 seconds of
 messages received from that VM (every OTLP metrics/log/span export becomes
 one line in the collector's per-service message feed). The page polls
 `/api/dashboard` every 5 seconds and updates the cards in place, so needles
-and bars animate smoothly; `/api/dashboard` and `/runs` are plain JSON for
-scripting.
+and bars animate smoothly, and a textbox at the bottom shows the output of
+all agents across every VM (newest last, auto-scrolled); `/api/dashboard`
+and `/runs` are plain JSON for scripting.
 
 The manifest embeds the Python sources in a ConfigMap. After changing any
 file in this directory:

@@ -248,7 +248,7 @@ def dashboard_data(store, runs, runs_lock):
         run = runs_snapshot[name]
         if not run or run.get("running"):
             continue
-        for line in run.get("findings", [])[-15:]:
+        for line in run.get("findings", [])[-30:]:
             findings.append({"service": name, "finding": line})
 
     return {
@@ -336,9 +336,10 @@ def render_dashboard_shell():
             font-size: .72rem; line-height: 1.35; flex: 1; min-height: 7.2rem; }
     .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
     .timeline h2 { font-size: 1rem; color: var(--muted); font-weight: 600; }
-    .timeline-item { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: var(--muted);
-                     border-left: 2px solid var(--edge); padding: .16rem 0 .16rem .7rem; margin: .18rem 0 .18rem .1rem; }
-    .timeline-item b { color: var(--ink); font-weight: 600; }
+    textarea.agent-output { width: 100%; resize: vertical; background: #0b1220; color: #9fb3c8;
+            border: 1px solid var(--edge); border-radius: 10px; padding: .6rem .8rem;
+            font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
+            line-height: 1.4; min-height: 18rem; }
     noscript { color: var(--warn); padding: 2rem; display: block; }
   </style>
 </head>
@@ -349,8 +350,8 @@ def render_dashboard_shell():
   </header>
   <main class="grid" id="cards"></main>
   <section class="timeline">
-    <h2>Agent findings (latest run, newest last)</h2>
-    <div id="findings"></div>
+    <h2>Agent output (all VMs, newest last)</h2>
+    <textarea id="agentOutput" class="messages agent-output" readonly rows="20"></textarea>
   </section>
   <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
   <script>
@@ -359,7 +360,7 @@ def render_dashboard_shell():
     const REFRESH_MS = 5000;
     const cardsRoot = document.getElementById('cards');
     const statsEl = document.getElementById('stats');
-    const findingsEl = document.getElementById('findings');
+    const agentOutput = document.getElementById('agentOutput');
     const cards = new Map();
 
     function el(tag, cls, text) {
@@ -620,14 +621,13 @@ def render_dashboard_shell():
         if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
         updateCard(svc, refs);
       });
-      findingsEl.textContent = '';
-      data.findings.forEach(function (item) {
-        const node = el('div', 'timeline-item');
-        const b = el('b', null, item.service + ' ');
-        node.appendChild(b);
-        node.appendChild(document.createTextNode(item.finding));
-        findingsEl.appendChild(node);
-      });
+      // All agents' output for every VM, newest last, in one textbox.
+      agentOutput.value = data.findings.length
+        ? data.findings.map(function (item) {
+            return '[' + item.service + '] ' + item.finding;
+          }).join('\n')
+        : 'no agent output yet';
+      agentOutput.scrollTop = agentOutput.scrollHeight;
     }
 
     function poll() {
@@ -812,7 +812,7 @@ def self_check():
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
                    "repeat(2, minmax(0, 1fr))", "cardIn", "animationDelay", "textarea",
-                   "messages", "not detected", "vm-flowing", "vm-silent"):
+                   "messages", "not detected", "vm-flowing", "vm-silent", "agentOutput"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
     # Cards must never be removed for a down VM, and the status bar is
