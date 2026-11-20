@@ -2847,7 +2847,6 @@ data:
     """
 
     import argparse
-    import html
     import json
     import os
     import threading
@@ -2972,6 +2971,15 @@ data:
             from urllib.parse import parse_qs, urlparse
 
             parsed_url = urlparse(self.path)
+            if parsed_url.path == "/api/dashboard":
+                payload = dashboard_data(self.store, self.runs, self.runs_lock)
+                body = json.dumps(payload, default=str).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if parsed_url.path == "/runs":
                 with self.runs_lock:
                     payload = dict(self.runs)
@@ -2983,7 +2991,7 @@ data:
                 self.wfile.write(body)
                 return
             if parsed_url.path in ("/", "/dashboard"):
-                page = render_workflow_dashboard(self.store, self.runs, self.runs_lock).encode()
+                page = render_dashboard_shell().encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(page)))
@@ -2993,219 +3001,434 @@ data:
             super().do_GET()
 
 
-    def _fmt_duration(seconds):
-        seconds = max(0, int(seconds))
-        minutes, secs = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours:
-            return f"{hours}h {minutes}m"
-        if minutes:
-            return f"{minutes}m {secs}s"
-        return f"{secs}s"
-
-
-    def _pill(text, cls):
-        return f'<span class="pill {cls}">{html.escape(str(text))}</span>'
-
-
-    def render_workflow_dashboard(store, runs, runs_lock):
-        """Unified dashboard, built only from telemetry and workflow run state:
-
-        (1) VM status (telemetry view), (2) service status per VM, (3) anomalies
-        detected, (4) RCA output, (5) the recommended remediation destined for
-        Ansible through EDA."""
+    def dashboard_data(store, runs, runs_lock):
+        """Everything the dashboard renders, as JSON-safe data. Built only from
+        telemetry windows and workflow run state — no cluster or MCP queries."""
         with runs_lock:
             runs_snapshot = dict(runs)
 
         window_seconds = 600
-        names = sorted(set(store.services()) | set(runs_snapshot))
-
-        vm_rows, service_rows = [], []
-        for name in names:
+        services = []
+        for name in sorted(set(store.services()) | set(runs_snapshot)):
             window = store.window(name, window_seconds)
             metrics = window.get("metrics", {})
-            logs = window.get("logs", [])
-            traces = window.get("traces", [])
             events = window.get("metric_events", [])
             last_seen = window.get("last_seen_seconds_ago")
             if not window.get("ever_seen"):
-                vm_status = _pill("no telemetry yet", "muted")
+                vm_status = "none"
             elif last_seen is not None and last_seen <= state.DEFAULT_SILENCE_SECONDS:
-                vm_status = _pill("telemetry flowing", "ok")
+                vm_status = "flowing"
             else:
-                vm_status = _pill(f"silent {last_seen:.0f}s", "bad")
-            observed = window.get("observed_for_seconds")
-            vm_rows.append(
-                "<tr>"
-                f"<td>{html.escape(name)}</td>"
-                f"<td>{vm_status}</td>"
-                f"<td>{'-' if last_seen is None else f'{last_seen:.0f}s ago'}</td>"
-                f"<td>{'-' if not observed else _fmt_duration(observed)}</td>"
-                f"<td>{len(metrics)}</td>"
-                f"<td>{len(logs)} ({sum(1 for item in logs if item.get('severity_number', 0) >= 17)} err)</td>"
-                f"<td>{len(traces)} ({sum(1 for item in traces if item.get('status_code') == 2)} failed)</td>"
-                "</tr>"
-            )
-            uptime = metrics.get("service.uptime")
-            restarts = sum(1 for item in events if item.get("metric") == "service.uptime")
-            crash = metrics.get("dummy-crash", 0)
-            fault = _pill(f"fault flag {crash}", "bad") if crash else _pill("clear", "ok")
-            cpu = metrics.get("service.cpu.load")
-            memory = metrics.get("service.memory.load")
-            service_rows.append(
-                "<tr>"
-                f"<td>{html.escape(name)}</td>"
-                f"<td>{'-' if uptime is None else _fmt_duration(uptime)}</td>"
-                f"<td>{restarts}</td>"
-                f"<td>{'-' if cpu is None else f'{cpu:.1f}%'}</td>"
-                f"<td>{'-' if memory is None else f'{memory:.1f}%'}</td>"
-                f"<td>{fault}</td>"
-                "</tr>"
-            )
-
-        anomaly_rows, rca_rows, remediation_rows = [], [], []
-        for name in names:
+                vm_status = "silent"
             run = runs_snapshot.get(name)
-            if not run or run.get("running"):
-                note = "workflow running" if run else "no run yet"
-                cell = _pill(note, "muted")
-                anomaly_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
-                                    "<td colspan=\"4\"></td></tr>")
-                rca_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
-                                "<td></td><td></td><td></td></tr>")
-                remediation_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
-                                        "<td></td><td></td><td></td></tr>")
-                continue
-            anomaly = run.get("anomaly", {})
-            detected = anomaly.get("detected")
-            status = _pill("anomaly", "bad") if detected else _pill("healthy", "ok")
-            anomaly_rows.append(
-                "<tr>"
-                f"<td>{html.escape(name)}</td>"
-                f"<td>{status}</td>"
-                f"<td>{html.escape(', '.join(anomaly.get('signals', [])) or '-')}</td>"
-                f"<td>{html.escape(str(anomaly.get('severity', '-')))}</td>"
-                f"<td>{html.escape(str(anomaly.get('summary', ''))[:220])}</td>"
-                f"<td>{run.get('attempts', 0)}/{run.get('max_attempts', state.DEFAULT_MAX_ATTEMPTS)}</td>"
-                "</tr>"
-            )
-            root_cause = run.get("root_cause", {})
-            confidence = root_cause.get("confidence", "n/a")
-            cls = "ok" if confidence == "high" else ("warn" if confidence == "medium" else "muted")
-            rca_rows.append(
-                "<tr>"
-                f"<td>{html.escape(name)}</td>"
-                f"<td>{html.escape(str(root_cause.get('component', '-')))}</td>"
-                f"<td>{_pill(confidence, cls)}</td>"
-                f"<td>{html.escape(str(root_cause.get('summary', ''))[:300])}</td>"
-                f"<td>{len(run.get('investigation', []))}</td>"
-                "</tr>"
-            )
-            remediation = run.get("remediation", {})
-            plan = remediation.get("plan", [])
-            plan_html = "<br>".join(
-                f"{index + 1}. {html.escape(step.get('tool', ''))} "
-                f"{html.escape(json.dumps(step.get('arguments', {})))[:120]}"
-                for index, step in enumerate(plan)
-            ) or "none"
-            result = run.get("remediation_result", {})
-            if result.get("ok"):
-                result_pill = _pill("executed ok", "ok")
-            elif result:
-                result_pill = _pill("failed", "bad")
-            else:
-                result_pill = _pill("pending", "muted")
-            eda = (result.get("eda") or {}).get("status", "not configured")
-            remediation_rows.append(
-                "<tr>"
-                f"<td>{html.escape(name)}</td>"
-                f"<td>{plan_html}</td>"
-                f"<td>{result.get('attempts', run.get('attempts', 0))}</td>"
-                f"<td>{result_pill}</td>"
-                f"<td>{html.escape(str(eda))}</td>"
-                "</tr>"
-            )
+            run_view = None
+            if run and run.get("running"):
+                run_view = {"status": "running"}
+            elif run:
+                run_view = {
+                    "status": run.get("status"),
+                    "anomaly": run.get("anomaly", {}),
+                    "root_cause": run.get("root_cause", {}),
+                    "plan": run.get("remediation", {}).get("plan", []),
+                    "result": run.get("remediation_result", {}),
+                    "attempts": run.get("attempts", 0),
+                    "max_attempts": run.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS),
+                    "investigation_steps": len(run.get("investigation", [])),
+                }
+            services.append({
+                "name": name,
+                "vm": {
+                    "status": vm_status,
+                    "last_seen_seconds_ago": last_seen,
+                    "observed_for_seconds": window.get("observed_for_seconds"),
+                    "metrics": len(metrics),
+                    "logs": len(window.get("logs", [])),
+                    "traces": len(window.get("traces", [])),
+                },
+                "service": {
+                    "uptime": metrics.get("service.uptime"),
+                    "restarts": sum(1 for item in events if item.get("metric") == "service.uptime"),
+                    "cpu": metrics.get("service.cpu.load"),
+                    "memory": metrics.get("service.memory.load"),
+                    "fault": metrics.get("dummy-crash", 0),
+                },
+                "run": run_view,
+            })
 
-        findings_rows = []
+        findings = []
         for name in sorted(runs_snapshot):
             run = runs_snapshot[name]
             if not run or run.get("running"):
                 continue
-            for line in run.get("findings", [])[-12:]:
-                findings_rows.append(
-                    f"<tr><td>{html.escape(name)}</td><td>{html.escape(line)}</td></tr>"
-                )
-        findings_body = ("\n".join(findings_rows)) or "<tr><td colspan=\"2\">No agent findings yet.</td></tr>"
-        llm_state = "on" if llm.available() else "off (heuristic fallback)"
-        return f"""<!DOCTYPE html>
+            for line in run.get("findings", [])[-15:]:
+                findings.append({"service": name, "finding": line})
+
+        return {
+            "services": services,
+            "findings": findings,
+            "meta": {
+                "llm": llm.available(),
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        }
+
+
+    def render_dashboard_shell():
+        """The dashboard page: a static shell that polls /api/dashboard and
+        renders cards with rotating dial gauges and progress bars in place, so
+        needles sweep smoothly between updates instead of reloading."""
+        return r"""<!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="utf-8">
-      <meta http-equiv="refresh" content="5">
       <title>AIOps unified view</title>
       <style>
-        body {{ font-family: "Segoe UI", Helvetica, Arial, sans-serif; margin: 2rem; background: #f4f6f8; color: #1f2933; }}
-        main {{ max-width: 76rem; }}
-        h2 {{ margin: 2rem 0 0.5rem; }}
-        table {{ width: 100%; border-collapse: collapse; background: #fff; }}
-        th, td {{ border: 1px solid #e2e8f0; padding: 0.5rem 0.8rem; text-align: left; vertical-align: top; }}
-        th {{ background: #eef2f6; }}
-        .pill {{ padding: 0.05rem 0.55rem; border-radius: 999px; font-size: 0.85rem; white-space: nowrap; }}
-        .ok {{ background: #dff5e7; color: #0f7b3a; }}
-        .bad {{ background: #fde5e2; color: #b42318; }}
-        .warn {{ background: #fdf0d7; color: #a15c00; }}
-        .muted {{ background: #eef2f6; color: #52606d; }}
-        p.meta {{ color: #52606d; }}
+        :root {
+          --bg: #0b1220; --card: #141d30; --edge: #293548; --ink: #e6edf6;
+          --muted: #8ea0b5; --ok: #34d399; --bad: #f87171; --warn: #fbbf24; --accent: #38bdf8;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0; color: var(--ink);
+          background: radial-gradient(1200px 600px at 20% -10%, #16233c 0%, var(--bg) 55%);
+          font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+        }
+        header { padding: 1.4rem 2rem .6rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: .5rem; }
+        h1 { margin: 0; font-size: 1.45rem; letter-spacing: .01em; }
+        h1 span { color: var(--accent); }
+        .stats { color: var(--muted); font-size: .9rem; align-self: baseline; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 1.1rem; padding: 1rem 2rem; }
+        .card { background: var(--card); border: 1px solid var(--edge); border-radius: 16px;
+                padding: 1rem 1.2rem 1.1rem; box-shadow: 0 14px 34px rgba(0,0,0,.35); }
+        .card-head { display: flex; justify-content: space-between; align-items: center; }
+        .card-head h2 { margin: 0; font-size: 1.02rem; font-weight: 600; }
+        .pill { padding: .14rem .62rem; border-radius: 999px; font-size: .76rem; white-space: nowrap;
+                display: inline-flex; align-items: center; gap: .38rem; }
+        .pill.ok { background: rgba(52,211,153,.14); color: var(--ok); }
+        .pill.bad { background: rgba(248,113,113,.14); color: var(--bad); }
+        .pill.warn { background: rgba(251,191,36,.14); color: var(--warn); }
+        .pill.muted { background: rgba(142,160,181,.14); color: var(--muted); }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: pulse 2.2s ease-in-out infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+        .dials { display: flex; gap: 1.2rem; align-items: flex-end; margin: .8rem 0 .2rem; }
+        .dial { text-align: center; }
+        .dial svg { overflow: visible; }
+        .needle { transition: transform 1s cubic-bezier(.35,0,.25,1); }
+        .arc { transition: stroke-dasharray 1s ease, stroke .6s ease; }
+        .dial-value { font-size: 1.06rem; font-weight: 650; margin-top: -6px; font-variant-numeric: tabular-nums; }
+        .dial-label { font-size: .66rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-top: .1rem; }
+        .side-stats { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: .3rem .9rem; font-size: .84rem; }
+        .side-stats .k { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; }
+        .side-stats b { font-weight: 620; font-variant-numeric: tabular-nums; }
+        .bar { height: 8px; border-radius: 6px; background: var(--edge); overflow: hidden; }
+        .bar i { display: block; height: 100%; border-radius: 6px; background: var(--accent);
+                 transition: width 1s ease, background .6s ease; }
+        .kv { margin: .55rem 0 .15rem; }
+        .kv .label { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .22rem; }
+        .sep { border: 0; border-top: 1px dashed var(--edge); margin: .85rem 0 .35rem; }
+        .row { display: flex; align-items: center; gap: .55rem; margin: .5rem 0; font-size: .84rem; }
+        .row .tag { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; width: 5.2rem; flex: none; }
+        .row .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .chip { font-size: .72rem; padding: .1rem .5rem; border-radius: 6px; background: rgba(56,189,248,.12); color: var(--accent); white-space: nowrap; }
+        .timeline { padding: .4rem 2rem 3rem; }
+        .timeline h2 { font-size: 1rem; color: var(--muted); font-weight: 600; }
+        .timeline-item { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: var(--muted);
+                         border-left: 2px solid var(--edge); padding: .16rem 0 .16rem .7rem; margin: .18rem 0 .18rem .1rem; }
+        .timeline-item b { color: var(--ink); font-weight: 600; }
+        noscript { color: var(--warn); padding: 2rem; display: block; }
       </style>
     </head>
     <body>
-      <main>
-        <h1>AIOps unified view &mdash; autonomous remediation</h1>
-        <p class="meta">{len(names)} services &middot; built from telemetry only &middot; llm: {llm_state}</p>
-
-        <h2>1. Status of VMs (telemetry view)</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Telemetry</th><th>Last export</th><th>Observed for</th><th>Metrics</th><th>Logs</th><th>Traces</th></tr></thead>
-          <tbody>{''.join(vm_rows) or no_telemetry_row(7)}</tbody>
-        </table>
-
-        <h2>2. Service status per VM (telemetry view)</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Process uptime</th><th>Restarts (10m)</th><th>Host CPU</th><th>Host memory</th><th>Fault state</th></tr></thead>
-          <tbody>{''.join(service_rows) or no_telemetry_row(6)}</tbody>
-        </table>
-
-        <h2>3. Anomalies detected</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Status</th><th>Signals</th><th>Severity</th><th>Summary</th><th>Attempts</th></tr></thead>
-          <tbody>{''.join(anomaly_rows)}</tbody>
-        </table>
-
-        <h2>4. RCA output</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Component</th><th>Confidence</th><th>Root cause</th><th>Steps</th></tr></thead>
-          <tbody>{''.join(rca_rows)}</tbody>
-        </table>
-
-        <h2>5. Recommended remediation &rarr; Ansible (EDA)</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Plan</th><th>Attempts</th><th>Execution</th><th>EDA delivery</th></tr></thead>
-          <tbody>{''.join(remediation_rows)}</tbody>
-        </table>
-
+      <header>
+        <h1>AIOps unified view <span>&mdash; autonomous remediation</span></h1>
+        <div class="stats" id="stats">loading&hellip;</div>
+      </header>
+      <main class="grid" id="cards"></main>
+      <section class="timeline">
         <h2>Agent findings (latest run, newest last)</h2>
-        <table>
-          <thead><tr><th>VM</th><th>Finding</th></tr></thead>
-          <tbody>{findings_body}</tbody>
-        </table>
-      </main>
+        <div id="findings"></div>
+      </section>
+      <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
+      <script>
+      (function () {
+        'use strict';
+        const REFRESH_MS = 5000;
+        const cardsRoot = document.getElementById('cards');
+        const statsEl = document.getElementById('stats');
+        const findingsEl = document.getElementById('findings');
+        const cards = new Map();
+
+        function el(tag, cls, text) {
+          const node = document.createElement(tag);
+          if (cls) node.className = cls;
+          if (text != null) node.textContent = text;
+          return node;
+        }
+        function fmtDuration(seconds) {
+          if (seconds == null || seconds < 0) return '-';
+          seconds = Math.floor(seconds);
+          const h = Math.floor(seconds / 3600), m = Math.floor(seconds / 60) % 60, s = seconds % 60;
+          if (h) return h + 'h ' + m + 'm';
+          if (m) return m + 'm ' + s + 's';
+          return s + 's';
+        }
+        function colorFor(value, warn, bad) {
+          if (value == null) return 'var(--muted)';
+          if (value >= bad) return 'var(--bad)';
+          if (value >= warn) return 'var(--warn)';
+          return 'var(--ok)';
+        }
+
+        // Semicircle SVG dial with a rotating needle and a value arc.
+        const R = 52, CX = 66, CY = 66, ARC_LEN = Math.PI * R;
+        function arcPath() {
+          return 'M ' + (CX - R) + ' ' + CY + ' A ' + R + ' ' + R + ' 0 0 1 ' + (CX + R) + ' ' + CY;
+        }
+        function makeDial(title) {
+          const NS = 'http://www.w3.org/2000/svg';
+          const wrap = el('div', 'dial');
+          const svg = document.createElementNS(NS, 'svg');
+          svg.setAttribute('width', '132'); svg.setAttribute('height', '80');
+          svg.setAttribute('viewBox', '0 0 132 80');
+          for (let i = 0; i <= 10; i++) {
+            const a = Math.PI * (1 - i / 10);
+            const tick = document.createElementNS(NS, 'line');
+            tick.setAttribute('x1', (CX + 43 * Math.cos(a)).toFixed(1));
+            tick.setAttribute('y1', (CY - 43 * Math.sin(a)).toFixed(1));
+            tick.setAttribute('x2', (CX + 47 * Math.cos(a)).toFixed(1));
+            tick.setAttribute('y2', (CY - 47 * Math.sin(a)).toFixed(1));
+            tick.setAttribute('stroke', '#3b4a61'); tick.setAttribute('stroke-width', '1.4');
+            svg.appendChild(tick);
+          }
+          const track = document.createElementNS(NS, 'path');
+          track.setAttribute('d', arcPath()); track.setAttribute('fill', 'none');
+          track.setAttribute('stroke', '#2a3850'); track.setAttribute('stroke-width', '9');
+          track.setAttribute('stroke-linecap', 'round');
+          svg.appendChild(track);
+          const arc = document.createElementNS(NS, 'path');
+          arc.setAttribute('d', arcPath()); arc.setAttribute('fill', 'none');
+          arc.setAttribute('class', 'arc');
+          arc.setAttribute('stroke', 'var(--ok)'); arc.setAttribute('stroke-width', '9');
+          arc.setAttribute('stroke-linecap', 'round');
+          arc.setAttribute('stroke-dasharray', '0 ' + ARC_LEN.toFixed(1));
+          svg.appendChild(arc);
+          const needle = document.createElementNS(NS, 'line');
+          needle.setAttribute('x1', CX); needle.setAttribute('y1', CY);
+          needle.setAttribute('x2', CX); needle.setAttribute('y2', 26);
+          needle.setAttribute('stroke', '#e6edf6'); needle.setAttribute('stroke-width', '2.4');
+          needle.setAttribute('stroke-linecap', 'round');
+          needle.setAttribute('class', 'needle');
+          needle.style.transformOrigin = CX + 'px ' + CY + 'px';
+          needle.style.transform = 'rotate(-90deg)';
+          svg.appendChild(needle);
+          const hub = document.createElementNS(NS, 'circle');
+          hub.setAttribute('cx', CX); hub.setAttribute('cy', CY); hub.setAttribute('r', '4');
+          hub.setAttribute('fill', '#e6edf6');
+          svg.appendChild(hub);
+          const value = el('div', 'dial-value', '-');
+          wrap.appendChild(svg); wrap.appendChild(value);
+          wrap.appendChild(el('div', 'dial-label', title));
+          return {
+            node: wrap,
+            set: function (v, unit) {
+              const clamped = v == null ? 0 : Math.max(0, Math.min(100, v));
+              needle.style.transform = 'rotate(' + (clamped / 100 * 180 - 90).toFixed(1) + 'deg)';
+              arc.setAttribute('stroke-dasharray',
+                ((clamped / 100) * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
+              arc.setAttribute('stroke', colorFor(v, 60, 85));
+              value.textContent = v == null ? '-' : v.toFixed(1) + unit;
+            },
+          };
+        }
+
+        function sideStat(parent, key) {
+          const cell = el('div');
+          cell.appendChild(el('div', 'k', key));
+          const val = el('b', null, '-');
+          cell.appendChild(val);
+          parent.appendChild(cell);
+          return val;
+        }
+        function pill(cls, text, withDot) {
+          const p = el('span', 'pill ' + cls, text);
+          if (withDot) { p.prepend(el('span', 'dot')); }
+          return p;
+        }
+        function row(parent, tag) {
+          const r = el('div', 'row');
+          r.appendChild(el('span', 'tag', tag));
+          parent.appendChild(r);
+          return r;
+        }
+        function bar(parent) {
+          const b = el('div', 'bar');
+          const fill = el('i');
+          b.appendChild(fill);
+          parent.appendChild(b);
+          return fill;
+        }
+
+        function makeCard(svc) {
+          const root = el('div', 'card');
+          const head = el('div', 'card-head');
+          head.appendChild(el('h2', null, svc.name));
+          const status = pill('muted', '');
+          head.appendChild(status);
+          root.appendChild(head);
+
+          const dials = el('div', 'dials');
+          const cpu = makeDial('host cpu');
+          const mem = makeDial('host memory');
+          dials.appendChild(cpu.node); dials.appendChild(mem.node);
+          const side = el('div', 'side-stats');
+          const uptime = sideStat(side, 'process uptime');
+          const restarts = sideStat(side, 'restarts 10m');
+          const signals = sideStat(side, 'm / l / t');
+          const fault = sideStat(side, 'fault flag');
+          dials.appendChild(side);
+          root.appendChild(dials);
+
+          const fresh = el('div', 'kv');
+          fresh.appendChild(el('div', 'label', 'telemetry freshness'));
+          const freshFill = bar(fresh);
+          const freshText = el('div', 'k', '');
+          fresh.appendChild(freshText);
+          root.appendChild(fresh);
+
+          root.appendChild(el('hr', 'sep'));
+
+          const anomalyRow = row(root, 'anomaly');
+          const anomalyPill = pill('muted', 'no run yet');
+          const anomalyText = el('span', 'text', '');
+          anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
+
+          const rcaRow = row(root, 'rca');
+          const rcaWrap = el('div', 'text');
+          const rcaText = el('div', 'text', '');
+          const rcaFill = bar(rcaWrap);
+          rcaRow.appendChild(rcaText); rcaRow.appendChild(rcaWrap);
+
+          const remRow = row(root, 'remedy');
+          const remWrap = el('div', 'text');
+          const remText = el('div', 'text', '');
+          const remFill = bar(remWrap);
+          const edaChip = el('span', 'chip', 'EDA: -');
+          remRow.appendChild(remText); remRow.appendChild(remWrap); remRow.appendChild(edaChip);
+
+          cardsRoot.appendChild(root);
+          return { root: root, status: status, cpu: cpu, mem: mem, uptime: uptime,
+                   restarts: restarts, signals: signals, fault: fault,
+                   freshFill: freshFill, freshText: freshText,
+                   anomalyPill: anomalyPill, anomalyText: anomalyText,
+                   rcaText: rcaText, rcaFill: rcaFill,
+                   remText: remText, remFill: remFill, edaChip: edaChip };
+        }
+
+        function setPill(node, cls, text, withDot) {
+          node.className = 'pill ' + cls;
+          node.textContent = text;
+          if (withDot) { node.prepend(el('span', 'dot')); }
+        }
+
+        function updateCard(svc, refs) {
+          const vm = svc.vm, service = svc.service;
+          if (vm.status === 'flowing') setPill(refs.status, 'ok', 'telemetry flowing', true);
+          else if (vm.status === 'silent') setPill(refs.status, 'bad', 'silent ' + Math.round(vm.last_seen_seconds_ago) + 's', true);
+          else setPill(refs.status, 'muted', 'no telemetry yet', false);
+          refs.cpu.set(service.cpu, '%');
+          refs.mem.set(service.memory, '%');
+          refs.uptime.textContent = fmtDuration(service.uptime);
+          refs.restarts.textContent = String(service.restarts);
+          refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
+          refs.fault.textContent = service.fault > 0 ? String(service.fault) : 'clear';
+          refs.fault.style.color = service.fault > 0 ? 'var(--bad)' : 'var(--ok)';
+          const observed = vm.observed_for_seconds || 0;
+          const freshPct = Math.max(4, 100 - Math.min(100, ((vm.last_seen_seconds_ago == null ? 600 : vm.last_seen_seconds_ago) / Math.max(observed, 60)) * 100));
+          refs.freshFill.style.width = freshPct.toFixed(1) + '%';
+          refs.freshFill.style.background = vm.status === 'flowing' ? 'var(--ok)' : 'var(--bad)';
+          refs.freshText.textContent = vm.last_seen_seconds_ago == null ? '-' : Math.round(vm.last_seen_seconds_ago) + 's ago · observed ' + fmtDuration(observed);
+
+          const run = svc.run;
+          if (!run) {
+            setPill(refs.anomalyPill, 'muted', 'no run yet', false);
+            refs.anomalyText.textContent = '';
+            refs.rcaText.textContent = ''; refs.rcaFill.style.width = '0%';
+            refs.remText.textContent = ''; refs.remFill.style.width = '0%';
+            refs.edaChip.textContent = 'EDA: -';
+            return;
+          }
+          if (run.status === 'running') {
+            setPill(refs.anomalyPill, 'warn', 'workflow running', true);
+            refs.anomalyText.textContent = '';
+            return;
+          }
+          const anomaly = run.anomaly || {};
+          if (anomaly.detected) {
+            setPill(refs.anomalyPill, 'bad', (anomaly.signals || []).join(', ') || 'anomaly', false);
+            refs.anomalyText.textContent = (anomaly.severity || '') + ' · attempt ' + run.attempts + '/' + run.max_attempts;
+          } else {
+            setPill(refs.anomalyPill, 'ok', 'healthy', false);
+            refs.anomalyText.textContent = run.status || '';
+          }
+          const rc = run.root_cause || {};
+          const confMap = { high: 100, medium: 60, low: 25 };
+          const conf = confMap[rc.confidence] || 0;
+          refs.rcaText.textContent = (rc.component || '?') + ' — ' + (rc.summary || '');
+          refs.rcaFill.style.width = conf + '%';
+          refs.rcaFill.style.background = rc.confidence === 'high' ? 'var(--ok)' :
+            (rc.confidence === 'medium' ? 'var(--warn)' : 'var(--muted)');
+          const result = run.result || {};
+          const plan = run.plan || [];
+          const step = plan.length ? plan[0].tool + ' ' + ((plan[0].arguments || {}).module || '') : 'none';
+          refs.remText.textContent = step + ' · ' + (result.ok ? 'executed ok' : (result.steps ? 'failed' : 'pending'));
+          const attemptPct = Math.min(100, (run.attempts / Math.max(1, run.max_attempts)) * 100);
+          refs.remFill.style.width = attemptPct + '%';
+          refs.remFill.style.background = result.ok ? 'var(--ok)' : 'var(--warn)';
+          const eda = (result.eda || {}).status || 'not configured';
+          refs.edaChip.textContent = 'EDA: ' + eda;
+        }
+
+        function update(data) {
+          const flowing = data.services.filter(s => s.vm.status === 'flowing').length;
+          const anomalies = data.services.filter(s => s.run && s.run.anomaly && s.run.anomaly.detected).length;
+          statsEl.textContent = data.services.length + ' VMs · ' + flowing + ' flowing · ' +
+            anomalies + ' anomaly · llm ' + (data.meta.llm ? 'on' : 'off') +
+            ' · updated ' + new Date(data.meta.generated_at).toLocaleTimeString();
+          const live = new Set();
+          data.services.forEach(function (svc) {
+            live.add(svc.name);
+            let refs = cards.get(svc.name);
+            if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
+            updateCard(svc, refs);
+          });
+          cards.forEach(function (refs, name) {
+            if (!live.has(name)) { refs.root.remove(); cards.delete(name); }
+          });
+          findingsEl.textContent = '';
+          data.findings.forEach(function (item) {
+            const node = el('div', 'timeline-item');
+            const b = el('b', null, item.service + ' ');
+            node.appendChild(b);
+            node.appendChild(document.createTextNode(item.finding));
+            findingsEl.appendChild(node);
+          });
+        }
+
+        function poll() {
+          fetch('/api/dashboard')
+            .then(function (r) { return r.json(); })
+            .then(update)
+            .catch(function () { statsEl.textContent = 'connection lost — retrying'; });
+        }
+        setInterval(poll, REFRESH_MS);
+        poll();
+      })();
+      </script>
     </body>
     </html>
     """
 
 
-    def no_telemetry_row(columns):
-        return f"<tr><td colspan=\"{columns}\">No telemetry collected yet.</td></tr>"
 
 
     def serve_forever(args):
@@ -3330,7 +3553,7 @@ data:
                        root_cause_analyzer, remediation_selector, graph):
             module.self_check()
 
-        # The unified dashboard renders all five sections from telemetry + runs.
+        # The dashboard data carries telemetry + run state; the shell polls it.
         store = collector.TelemetryStore()
         now = time.monotonic()
         store.record_metrics(collector.parse_metrics(
@@ -3353,13 +3576,25 @@ data:
             "investigation": [{"iteration": 1, "tool": "get_service_status"}],
             "findings": ["[agent 1 anomaly detector] example"],
         })
-        page = render_workflow_dashboard(store, {"vm-1": run}, threading.Lock())
-        for expected in ("vm-1", "Status of VMs", "Service status per VM", "Anomalies detected",
-                         "RCA output", "Recommended remediation", "Ansible (EDA)",
-                         "telemetry flowing", "aiops-demo.service", "run_module",
-                         "not configured", "fault flag 1"):
-            if expected not in page:
-                raise SystemExit(f"{STEP}: dashboard missing {expected!r}")
+        data = dashboard_data(store, {"vm-1": run}, threading.Lock())
+        service = data["services"][0]
+        if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
+            raise SystemExit(f"{STEP}: dashboard data vm view wrong: {service['vm']}")
+        if service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0:
+            raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
+        if service["service"]["fault"] != 1:
+            raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
+        if service["run"]["root_cause"]["component"] != "aiops-demo.service":
+            raise SystemExit(f"{STEP}: dashboard data rca wrong: {service['run']}")
+        if service["run"]["result"]["eda"]["status"] != "not configured":
+            raise SystemExit(f"{STEP}: dashboard data eda wrong: {service['run']}")
+        if not data["findings"]:
+            raise SystemExit(f"{STEP}: dashboard data findings missing")
+        json.dumps(data, default=str)  # must be JSON-serializable
+        shell = render_dashboard_shell()
+        for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline"):
+            if marker not in shell:
+                raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
 
         final = run_offline_demo()
         if final.get("status") != state.STATUS_REMEDIATED:

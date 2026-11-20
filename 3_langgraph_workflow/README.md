@@ -90,13 +90,14 @@ set `EDA_EVENT_URL` (plus `EDA_EVENT_USERNAME`/`EDA_EVENT_PASSWORD`); the
 executor posts the plan and root cause there and the dashboard shows the
 delivery status.
 
-The dashboard at `/` is a unified view built **only from telemetry and
-workflow state**: (1) VM status (telemetry freshness, observed-for, signal
-counts), (2) service status per VM (process uptime, restarts detected from
-uptime resets, host CPU/memory, fault flag), (3) anomalies detected,
-(4) RCA output (component, confidence, investigation steps), and (5) the
-recommended remediation with its EDA delivery status, plus the agent
-findings trail.
+The dashboard at `/` is a card-based view built **only from telemetry and
+workflow state**: each VM gets a card with rotating dial gauges for host CPU
+and memory, a telemetry-freshness bar, process uptime and restart counts,
+and the workflow rows — anomaly badge, RCA summary with a confidence bar,
+and the recommended remediation with an attempts bar and its EDA delivery
+chip. The page polls `/api/dashboard` every 5 seconds and updates the cards
+in place, so needles and bars animate smoothly; `/api/dashboard` and
+`/runs` are plain JSON for scripting.
 
 The manifest embeds the Python sources in a ConfigMap. After changing any
 file in this directory:
