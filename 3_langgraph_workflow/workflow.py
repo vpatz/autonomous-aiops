@@ -110,8 +110,8 @@ def vm_inventory(namespace=None, refresh_seconds=VM_INVENTORY_SECONDS):
         name = item.get("metadata", {}).get("name", "")
         if not name:
             continue
-        # runStrategy-based VMs have no spec.running; treat those as running.
-        vms[name] = {"running": bool(item.get("spec", {}).get("running", True))}
+        spec = item.get("spec", {})
+        vms[name] = {"running": spec.get("running", spec.get("runStrategy") != "Halted")}
     _inventory.update({"at": now, "vms": vms})
     return _inventory["vms"]
 
@@ -262,7 +262,8 @@ def dashboard_data(store, runs, runs_lock, inventory=None):
 
     window_seconds = 600
     services = []
-    for name in sorted(set(store.services()) | set(runs_snapshot) | set(inventory)):
+    expected = os.environ.get("DASHBOARD_VMS", "").split()
+    for name in sorted(set(expected) | set(store.services()) | set(runs_snapshot) | set(inventory)):
         window = store.window(name, window_seconds)
         metrics = window.get("metrics", {})
         events = window.get("metric_events", [])
@@ -366,7 +367,8 @@ def render_dashboard_shell():
     .card.vm-flowing { border-left-color: var(--ok); }
     .card.vm-silent { border-left-color: var(--bad); }
     .card.vm-down { border-left-color: var(--bad); }
-    .card.vm-none { border-left-color: var(--muted); }
+    .card.vm-none { border-left-color: var(--bad); }
+    .dial.offline { filter: grayscale(1); }
     @keyframes cardIn { from { opacity: 0; transform: translateY(12px); }
                         to { opacity: 1; transform: none; } }
     .card-head { display: flex; justify-content: space-between; align-items: center; }
@@ -514,6 +516,7 @@ def render_dashboard_shell():
             : ((clamped / 100) * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
           arc.setAttribute('stroke', muted ? 'var(--edge)' : colorFor(v, 60, 85));
           wrap.style.opacity = muted ? '0.45' : '1';
+          wrap.classList.toggle('offline', muted);
           value.textContent = muted ? '0.0' + unit : (v == null ? '-' : v.toFixed(1) + unit);
         },
       };
@@ -625,12 +628,12 @@ def render_dashboard_shell():
       } else if (vm.status === 'down') {
         setPill(refs.status, 'bad', 'vm down', true);
       } else {
-        setPill(refs.status, 'muted', 'no telemetry yet', false);
+        setPill(refs.status, 'bad', 'no telemetry yet', false);
       }
       // Gauges gray out at zero whenever telemetry is not flowing.
       const muted = vm.status !== 'flowing';
-      refs.cpu.set(service.cpu, '%', muted);
-      refs.mem.set(service.memory, '%', muted);
+      refs.cpu.set(service.cpu, '%', muted || service.cpu == null);
+      refs.mem.set(service.memory, '%', muted || service.memory == null);
       refs.uptime.textContent = fmtDuration(service.uptime);
       refs.restarts.textContent = String(service.restarts);
       refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
@@ -697,6 +700,15 @@ def render_dashboard_shell():
         let refs = cards.get(svc.name);
         if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
         updateCard(svc, refs);
+      });
+      const reported = new Set(data.services.map(svc => svc.name));
+      cards.forEach(function (refs, name) {
+        if (reported.has(name)) return;
+        refs.root.className = 'card vm-none';
+        setPill(refs.status, 'bad', 'no telemetry', false);
+        refs.cpu.set(0, '%', true);
+        refs.mem.set(0, '%', true);
+        refs.msgBox.value = 'no messages in the last 30s';
       });
       // All agents' output for every VM, newest last, in one textbox.
       agentOutput.value = data.findings.length

@@ -198,6 +198,8 @@ spec:
           value: "120"
         - name: SILENCE_SECONDS
           value: "10"
+        - name: DASHBOARD_VMS
+          value: "rhel10-service-1 rhel10-service-2 rhel10-service-3 rhel10-service-4"
       ports:
         - name: otlp-http
           containerPort: 4318
