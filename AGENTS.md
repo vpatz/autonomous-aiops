@@ -100,6 +100,13 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   `http://linux-mcp.my-vm-project.svc.cluster.local:8000/mcp` (deployed by
   `vm-deploy.yaml`). `mock_mcp_server.py --role linux|ansible` stands in for both roles
   offline (stdio JSON-RPC, same protocol as the real servers).
+- LLM integration: `LLM_BASE_URL` (OpenAI-compatible, include `/v1`), `LLM_MODEL`,
+  `LLM_API_KEY`. The pod reads them from an **optional** `llm-config` Secret
+  (`secretKeyRef` in workflow-pod.yaml — never commit keys); a missing secret just
+  means heuristic fallback. Test an endpoint with `llm.py --probe`. Agents best-effort:
+  detector keeps deterministic triggers, the RCA inner loop asks the model for
+  per-iteration tool decisions over the live tools/list, the selector's plan is
+  validated against approved tools only.
 - Stage 2: `receive_otel.py` and `call_eda.py` insert `eda/` into `sys.path`
   (`__file__`-relative) and import `receive_metrics` / `send_restart_event` as top-level
   modules — do not move or rename files without updating those inserts.

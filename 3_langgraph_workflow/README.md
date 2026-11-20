@@ -90,6 +90,54 @@ set `EDA_EVENT_URL` (plus `EDA_EVENT_USERNAME`/`EDA_EVENT_PASSWORD`); the
 executor posts the plan and root cause there and the dashboard shows the
 delivery status.
 
+### Integrating an LLM
+
+Every agent uses an OpenAI-compatible endpoint when configured, and falls
+back to deterministic heuristics when not — the demo runs either way. Three
+environment variables drive it: `LLM_BASE_URL` (including `/v1`, e.g. a
+vLLM or EnMaaS endpoint), `LLM_MODEL`, and `LLM_API_KEY` (bearer token).
+
+Locally:
+
+```sh
+export LLM_BASE_URL=https://<llm-host>/v1 LLM_MODEL=<model> LLM_API_KEY=<token>
+python3 3_langgraph_workflow/llm.py --probe     # one live round trip
+python3 3_langgraph_workflow/workflow.py --demo  # LLM-driven agents
+```
+
+On the cluster, credentials never go in git: the pod reads them from an
+(optional) `llm-config` Secret, so a missing secret simply means heuristic
+fallback:
+
+```sh
+oc create secret generic llm-config -n my-vm-project \
+  --from-literal=LLM_BASE_URL=https://<llm-host>/v1 \
+  --from-literal=LLM_MODEL=<model> \
+  --from-literal=LLM_API_KEY=<token>
+oc delete pod aiops-workflow -n my-vm-project
+oc apply -f 3_langgraph_workflow/workflow-pod.yaml
+```
+
+What changes with the LLM on:
+
+- **anomaly detector** — triggering stays deterministic (identical with or
+  without a model); the model only phrases the incident summary.
+- **root cause analyzer (inner loop)** — each iteration asks the model for
+  the next action as a JSON decision (`call_tool` with arguments, or
+  `conclude` with a root cause) over the *live* MCP `tools/list` catalog,
+  together with the investigation history. Against the real linux-mcp
+  server this is where the model can, for example, pick
+  `pcp_performance_summary` to cross-check a reported CPU spike against
+  real host load. Bounded by `--max-iterations`; unknown tool names fall
+  back to the deterministic playbook.
+- **remediation selector** — the model assembles the plan strictly from
+  the approved commands the Ansible MCP server advertises; steps naming
+  anything else are rejected before execution (the self-check proves it).
+
+The dashboard header and `--self-check` output show whether the LLM is
+configured, and the findings trail names the tool the model chose at each
+iteration.
+
 The dashboard at `/` is a card-based view built **only from telemetry and
 workflow state**: cards flow two per row, each with rotating dial gauges for
 host CPU and memory, a telemetry-freshness bar, process uptime and restart

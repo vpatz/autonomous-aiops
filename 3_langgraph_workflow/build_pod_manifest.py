@@ -132,11 +132,23 @@ spec:
         - name: HOME
           value: /tmp
         - name: LLM_BASE_URL
-          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: llm-config
+              key: LLM_BASE_URL
+              optional: true
         - name: LLM_MODEL
-          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: llm-config
+              key: LLM_MODEL
+              optional: true
         - name: LLM_API_KEY
-          value: ""
+          valueFrom:
+            secretKeyRef:
+              name: llm-config
+              key: LLM_API_KEY
+              optional: true
         - name: LINUX_MCP_URL
           value: http://linux-mcp.my-vm-project.svc.cluster.local:8000/mcp
         - name: ANSIBLE_MCP_URL
