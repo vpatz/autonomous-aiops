@@ -149,8 +149,9 @@ class Runner:
             print(f"[{STEP}] (dry-run) scheduled {detail}", flush=True)
             return
         print(f"[{STEP}] scheduled {detail}", flush=True)
+        # Non-daemon: the recovery must fire even though the injector's
+        # rounds finish earlier; Python waits for non-daemon threads at exit.
         timer = threading.Timer(delay, action)
-        timer.daemon = True
         timer.start()
         self.timers.append(timer)
 
@@ -498,6 +499,18 @@ def self_check():
     kill = record("kill-service", cfg_overrides={"recover_after": 120})
     if not any(item["kind"] == "later" for item in kill.recorded):
         raise SystemExit(f"{STEP}: kill-service ignores --recover-after")
+    # Recovery timers must be non-daemon so they fire after the rounds end
+    # (the injector process otherwise exits immediately after injecting).
+    live_cfg = Cfg()
+    live_cfg.recover_after = 1
+    live_runner = Runner(live_cfg)
+    live_runner.later(0.01, lambda: None, "timer liveness test")
+    timer = live_runner.timers[0]
+    if timer.daemon:
+        raise SystemExit(f"{STEP}: recovery timer must not be a daemon")
+    timer.join(timeout=5)
+    if timer.is_alive():
+        raise SystemExit(f"{STEP}: recovery timer did not fire")
 
     restart = record("restart-service")
     if "systemctl restart" not in restart.recorded[0]["detail"]:

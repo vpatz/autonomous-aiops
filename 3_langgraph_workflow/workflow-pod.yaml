@@ -1937,21 +1937,31 @@ data:
 
 
     def _conclude(investigation):
-        """Derive a root cause from the investigation outputs."""
+        """Derive a root cause from the investigation outputs.
+
+        A dead unit is checked first and always wins: live systemctl output is
+        ground truth, while journal text can contain stale history (older
+        service generations) that would otherwise misattribute the cause."""
         evidence = [item for item in investigation if item.get("status") == "ok"]
         text = " ".join(item.get("output", "") for item in evidence).lower()
+        if ("active: failed" in text or "inactive" in text
+                or "result: exit-code" in text or "code=killed" in text):
+            summary = (
+                f"The {SERVICE_UNIT} systemd unit is not running (exit-code failure). "
+                f"The unit has Restart=no, so nothing restarts it automatically."
+            )
+            return {
+                "found": True,
+                "component": SERVICE_UNIT,
+                "summary": summary,
+                "evidence": [truncate(item.get("output", ""), 200) for item in evidence],
+                "confidence": "high",
+            }
         if "dummy crash" in text or "dummy-crash" in text:
             summary = (
                 f"The application reported a dummy-crash fault (ERROR log, failed span, "
                 f"dummy-crash metric). The process is still running but is in an error "
                 f"state that persists until {SERVICE_UNIT} is restarted."
-            )
-            component = SERVICE_UNIT
-            confidence = "high"
-        elif "active: failed" in text or "inactive" in text or "result: exit-code" in text:
-            summary = (
-                f"The {SERVICE_UNIT} systemd unit is not running (exit-code failure). "
-                f"The unit has Restart=no, so nothing restarts it automatically."
             )
             component = SERVICE_UNIT
             confidence = "high"
@@ -2162,6 +2172,21 @@ data:
                 raise SystemExit(f"{STEP}: budget run should conclude, got {result.goto} at pass {passes}")
         if len(budget_calls) != 1:
             raise SystemExit(f"{STEP}: budget of 1 should allow exactly one tool call, got {len(budget_calls)}")
+
+        # A dead unit outranks stale dummy-crash lines in journal history.
+        mixed = _conclude([
+            {"status": "ok",
+             "output": "Active: failed (Result: exit-code); Main PID: 2841 (code=killed, status=9/KILL)"},
+            {"status": "ok", "output": "python3[2841]: service app sent dummy-crash event"},
+        ])
+        if "not running" not in mixed["summary"] or mixed["component"] != SERVICE_UNIT:
+            raise SystemExit(f"{STEP}: dead unit must outrank stale journal history: {mixed}")
+        running = _conclude([
+            {"status": "ok", "output": "Active: active (running) since Fri 2026-11-20 10:31:02 UTC"},
+            {"status": "ok", "output": "python3[2841]: ERROR: service app simulated a dummy crash"},
+        ])
+        if "dummy-crash" not in running["summary"]:
+            raise SystemExit(f"{STEP}: running service with fault evidence misattributed: {running}")
         print(f"{STEP}: self-check ok", flush=True)
 
 
