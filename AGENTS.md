@@ -74,20 +74,21 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   agents; nodes route with LangGraph `Command(goto=...)`, and `investigation`/`findings`
   are append-only state channels (the audit trail the dashboard shows).
 - The unified dashboard (`render_dashboard_shell` + `dashboard_data` in
-  `workflow.py`) is built **only from telemetry and run state** — it never
-  queries the Kubernetes API or MCP servers. The page is a static shell that
-  polls `/api/dashboard` (JSON) every 5s and renders per-VM cards (two per row,
-  never removed when a VM goes down — the card persists, color-coded by a status
-  accent stripe) with rotating SVG dial gauges (host CPU/memory), restart counts
-  from decreasing `service.uptime` samples (collector records them as
-  `metric_events` with `kind: restart`), anomaly/RCA/remediation rows with
-  progress bars, and a text area of the last 30s of received
-  messages (`TelemetryStore.messages`: one line per OTLP export, SDK-internal
-  metrics filtered out). A textbox at the bottom shows all agents' output
-  across VMs (from the run `findings` channel, newest last). The executor
-  optionally posts the recommended
-  remediation to an EDA event stream when `EDA_EVENT_URL` is set (stage-2
-  conventions: basic auth, `aiops-demo` user); the dashboard shows the
+  `workflow.py`) derives its content **only from telemetry and run state** — it
+  never queries MCP servers. It does list KubeVirt **VM objects** through the
+  pod's service account (Role: `virtualmachines` get/list) purely to know which
+  cards exist and whether a VM is stopped, so a down VM keeps its card (red,
+  `vm down`) even after a pod restart; a failed listing degrades to
+  telemetry-only. The page polls `/api/dashboard` every 5s and renders per-VM
+  cards (two per row, never removed) with rotating SVG dial gauges (host
+  CPU/memory — grayed out at zero when telemetry is not flowing), restart counts
+  from decreasing `service.uptime` samples, anomaly/RCA/remediation rows with
+  progress bars, and a text area of the last 30s of received messages
+  (`TelemetryStore.messages`: one line per OTLP export, SDK-internal metrics
+  filtered out). A textbox at the bottom shows all agents' output across VMs
+  (from the run `findings` channel, newest last). The executor optionally posts
+  the recommended remediation to an EDA event stream when `EDA_EVENT_URL` is set
+  (stage-2 conventions: basic auth, `aiops-demo` user); the dashboard shows the
   delivery status.
 - Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the eight demo scenarios
   (kill/restart service, stop network 60s, restart/shutdown VM, block telemetry 30s,

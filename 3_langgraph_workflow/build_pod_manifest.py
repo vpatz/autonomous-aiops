@@ -70,6 +70,36 @@ data:
 {config_map}
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiops-workflow
+  namespace: {NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aiops-workflow-vm-view
+  namespace: {NAMESPACE}
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources: ["virtualmachines"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aiops-workflow-vm-view
+  namespace: {NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aiops-workflow-vm-view
+subjects:
+  - kind: ServiceAccount
+    name: aiops-workflow
+    namespace: {NAMESPACE}
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: aiops-workflow
@@ -106,6 +136,7 @@ metadata:
     app: aiops-workflow
 spec:
   restartPolicy: Always
+  serviceAccountName: aiops-workflow
   securityContext:
     runAsNonRoot: true
     seccompProfile:

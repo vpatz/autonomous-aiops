@@ -51,6 +51,69 @@ import state
 
 STEP = "aiops workflow"
 DASHBOARD_MESSAGE_SECONDS = 30
+SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+VM_INVENTORY_SECONDS = 15
+_inventory = {"at": 0.0, "vms": {}}
+
+
+def _namespace():
+    try:
+        with open(os.path.join(SERVICE_ACCOUNT_DIR, "namespace"), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return os.environ.get("POD_NAMESPACE", "my-vm-project")
+
+
+def _kube_vm_items(namespace):
+    """List KubeVirt VM objects: in-cluster through the service account,
+    locally through `oc get -o json`."""
+    if os.path.isdir(SERVICE_ACCOUNT_DIR):
+        import ssl
+        import urllib.request
+
+        with open(os.path.join(SERVICE_ACCOUNT_DIR, "token"), encoding="utf-8") as handle:
+            token = handle.read().strip()
+        url = (f"https://kubernetes.default.svc/apis/kubevirt.io/v1/"
+               f"namespaces/{namespace}/virtualmachines")
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        context = ssl.create_default_context(
+            cafile=os.path.join(SERVICE_ACCOUNT_DIR, "ca.crt"))
+        with urllib.request.urlopen(request, timeout=5, context=context) as response:
+            return json.loads(response.read().decode()).get("items", [])
+    import subprocess
+
+    result = subprocess.run(
+        ["oc", "get", "vm", "-n", namespace, "-o", "json"],
+        capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip()[:200])
+    return json.loads(result.stdout).get("items", [])
+
+
+def vm_inventory(namespace=None, refresh_seconds=VM_INVENTORY_SECONDS):
+    """{vm_name: {"running": bool}} for the demo VMs.
+
+    Used only so a VM keeps its dashboard card (red) while it is down: a
+    stopped VM sends no telemetry, and the in-memory store forgets it when
+    the workflow pod restarts. Dashboard content stays telemetry-derived;
+    this is just the VM identity list from the cluster. Errors keep the
+    last known inventory (and an empty one degrades to telemetry-only)."""
+    now = time.monotonic()
+    if _inventory["at"] and now - _inventory["at"] < refresh_seconds:
+        return _inventory["vms"]
+    try:
+        items = _kube_vm_items(namespace or _namespace())
+    except (OSError, ValueError):
+        return _inventory["vms"]
+    vms = {}
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        # runStrategy-based VMs have no spec.running; treat those as running.
+        vms[name] = {"running": bool(item.get("spec", {}).get("running", True))}
+    _inventory.update({"at": now, "vms": vms})
+    return _inventory["vms"]
 
 
 def build_deps(args, store=None):
@@ -188,20 +251,26 @@ class WorkflowHandler(collector.CollectorHandler):
         super().do_GET()
 
 
-def dashboard_data(store, runs, runs_lock):
+def dashboard_data(store, runs, runs_lock, inventory=None):
     """Everything the dashboard renders, as JSON-safe data. Built only from
-    telemetry windows and workflow run state — no cluster or MCP queries."""
+    telemetry windows and workflow run state — plus the VM inventory, which
+    only decides which cards exist and whether a VM is down."""
     with runs_lock:
         runs_snapshot = dict(runs)
+    if inventory is None:
+        inventory = vm_inventory()
 
     window_seconds = 600
     services = []
-    for name in sorted(set(store.services()) | set(runs_snapshot)):
+    for name in sorted(set(store.services()) | set(runs_snapshot) | set(inventory)):
         window = store.window(name, window_seconds)
         metrics = window.get("metrics", {})
         events = window.get("metric_events", [])
         last_seen = window.get("last_seen_seconds_ago")
-        if not window.get("ever_seen"):
+        vm_state = inventory.get(name)
+        if vm_state is not None and not vm_state.get("running", True):
+            vm_status = "down"
+        elif not window.get("ever_seen"):
             vm_status = "none"
         elif last_seen is not None and last_seen <= state.DEFAULT_SILENCE_SECONDS:
             vm_status = "flowing"
@@ -296,6 +365,7 @@ def render_dashboard_shell():
             display: flex; flex-direction: column; }
     .card.vm-flowing { border-left-color: var(--ok); }
     .card.vm-silent { border-left-color: var(--bad); }
+    .card.vm-down { border-left-color: var(--bad); }
     .card.vm-none { border-left-color: var(--muted); }
     @keyframes cardIn { from { opacity: 0; transform: translateY(12px); }
                         to { opacity: 1; transform: none; } }
@@ -435,13 +505,16 @@ def render_dashboard_shell():
       wrap.appendChild(el('div', 'dial-label', title));
       return {
         node: wrap,
-        set: function (v, unit) {
-          const clamped = v == null ? 0 : Math.max(0, Math.min(100, v));
+        set: function (v, unit, muted) {
+          // When telemetry is not flowing the gauge is grayed out at zero
+          // instead of showing stale values.
+          const clamped = muted ? 0 : (v == null ? 0 : Math.max(0, Math.min(100, v)));
           needle.style.transform = 'rotate(' + (clamped / 100 * 180 - 90).toFixed(1) + 'deg)';
-          arc.setAttribute('stroke-dasharray',
-            ((clamped / 100) * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
-          arc.setAttribute('stroke', colorFor(v, 60, 85));
-          value.textContent = v == null ? '-' : v.toFixed(1) + unit;
+          arc.setAttribute('stroke-dasharray', muted ? '0 ' + ARC_LEN.toFixed(1)
+            : ((clamped / 100) * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
+          arc.setAttribute('stroke', muted ? 'var(--edge)' : colorFor(v, 60, 85));
+          wrap.style.opacity = muted ? '0.45' : '1';
+          value.textContent = muted ? '0.0' + unit : (v == null ? '-' : v.toFixed(1) + unit);
         },
       };
     }
@@ -549,11 +622,15 @@ def render_dashboard_shell():
         setPill(refs.status, 'ok', 'flowing · ' + Math.round(vm.last_seen_seconds_ago) + 's ago', true);
       } else if (vm.status === 'silent') {
         setPill(refs.status, 'bad', 'silent · ' + Math.round(vm.last_seen_seconds_ago) + 's', true);
+      } else if (vm.status === 'down') {
+        setPill(refs.status, 'bad', 'vm down', true);
       } else {
         setPill(refs.status, 'muted', 'no telemetry yet', false);
       }
-      refs.cpu.set(service.cpu, '%');
-      refs.mem.set(service.memory, '%');
+      // Gauges gray out at zero whenever telemetry is not flowing.
+      const muted = vm.status !== 'flowing';
+      refs.cpu.set(service.cpu, '%', muted);
+      refs.mem.set(service.memory, '%', muted);
       refs.uptime.textContent = fmtDuration(service.uptime);
       refs.restarts.textContent = String(service.restarts);
       refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
@@ -792,14 +869,19 @@ def self_check():
         "investigation": [{"iteration": 1, "tool": "get_service_status"}],
         "findings": ["[agent 1 anomaly detector] example"],
     })
-    data = dashboard_data(store, {"vm-1": run}, threading.Lock())
-    service = data["services"][0]
+    data = dashboard_data(store, {"vm-1": run}, threading.Lock(),
+                          inventory={"vm-1": {"running": True}, "vm-2": {"running": False}})
+    by_name = {item["name"]: item for item in data["services"]}
+    service = by_name["vm-1"]
     if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
         raise SystemExit(f"{STEP}: dashboard data vm view wrong: {service['vm']}")
     if service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0:
         raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
     if service["service"]["fault"] != 1:
         raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
+    # A VM the cluster reports as stopped keeps its card, marked down.
+    if "vm-2" not in by_name or by_name["vm-2"]["vm"]["status"] != "down":
+        raise SystemExit(f"{STEP}: stopped VM must keep a card with status down: {data['services']}")
     if not service["messages"] or not service["messages"][-1]["text"].startswith("metrics:"):
         raise SystemExit(f"{STEP}: dashboard data messages missing: {service.get('messages')}")
     if service["run"]["root_cause"]["component"] != "aiops-demo.service":
@@ -812,7 +894,8 @@ def self_check():
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
                    "repeat(2, minmax(0, 1fr))", "cardIn", "animationDelay", "textarea",
-                   "messages", "not detected", "vm-flowing", "vm-silent", "agentOutput"):
+                   "messages", "not detected", "vm-flowing", "vm-silent", "vm-down",
+                   "agentOutput", "wrap.style.opacity"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
     # Cards must never be removed for a down VM, and the status bar is
