@@ -17,8 +17,12 @@ Verify:
 """
 
 import argparse
+import base64
 import json
+import os
 import time
+import urllib.error
+import urllib.request
 
 import llm
 import mcp_client
@@ -33,6 +37,52 @@ VERIFY_POLL_SECONDS = 2
 def truncate(text, limit=300):
     text = (text or "").strip().replace("\n", " | ")
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def build_eda_payload(action, service_name, plan, root_cause):
+    """The remediation event handed to Ansible through EDA."""
+    return {
+        "action": action,
+        "service": service_name,
+        "plan": [
+            {"tool": step.get("tool", ""), "arguments": step.get("arguments", {})}
+            for step in plan
+        ],
+        "root_cause": root_cause.get("summary", ""),
+    }
+
+
+def build_eda_request(payload, username, password):
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return urllib.request.Request(
+        os.environ.get("EDA_EVENT_URL", "").strip(),
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {token}",
+        },
+        method="POST",
+    )
+
+
+def post_eda_event(payload):
+    """Best-effort delivery of the recommended remediation to the EDA event
+    stream (set EDA_EVENT_URL to enable; mirrors the stage-2 conventions)."""
+    url = os.environ.get("EDA_EVENT_URL", "").strip()
+    if not url:
+        return {"status": "not configured"}
+    username = os.environ.get("EDA_EVENT_USERNAME", "aiops-demo")
+    password = os.environ.get("EDA_EVENT_PASSWORD", "")
+    request = build_eda_request(payload, username, password)
+    import ssl
+
+    try:
+        with urllib.request.urlopen(
+            request, timeout=15, context=ssl._create_unverified_context()
+        ) as response:
+            return {"status": f"sent HTTP {response.status}", "url": url}
+    except (OSError, urllib.error.URLError) as exc:
+        return {"status": f"failed: {str(exc)[:120]}", "url": url}
 
 
 def _approved_plan(root_cause, tools, service_name):
@@ -202,6 +252,13 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
             update["status"] = state.STATUS_FAILED
             return Command(goto="__end__", update=update)
 
+        # Deliver the recommended remediation to Ansible through the EDA
+        # event stream (no-op unless EDA_EVENT_URL is configured).
+        root_cause = workflow_state.get("root_cause", {})
+        eda_record = post_eda_event(build_eda_payload("restart", service_name, plan, root_cause))
+        update["remediation_result"]["eda"] = eda_record
+        findings.append(f"[{STEP} executor] EDA delivery: {eda_record['status']}")
+
         # Outer loop: verify against telemetry received after the remediation.
         verify_since = time.monotonic()
         telemetry = workflow_state.get("telemetry", {})
@@ -213,7 +270,7 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
                     break  # fresh post-remediation telemetry is arriving
                 time.sleep(VERIFY_POLL_SECONDS)
                 telemetry = get_window(service_name, window_seconds, since=verify_since)
-        findings = [findings[0] + " -> handing over to the anomaly detector for verification"]
+        findings.append(f"[{STEP} executor] handing over to the anomaly detector for verification")
         update.update(
             {
                 "telemetry": telemetry,
@@ -313,6 +370,37 @@ def self_check():
     result = executor(workflow_state)
     if result.goto != "__end__" or result.update["status"] != state.STATUS_FAILED:
         raise SystemExit(f"{STEP}: failed execution should stop, got {result.goto}")
+
+    # EDA delivery: off without EDA_EVENT_URL; payload and request buildable.
+    saved = {key: os.environ.get(key) for key in
+             ("EDA_EVENT_URL", "EDA_EVENT_USERNAME", "EDA_EVENT_PASSWORD")}
+    os.environ.pop("EDA_EVENT_URL", None)
+    try:
+        record = post_eda_event(build_eda_payload("restart", "vm-1", [], {}))
+        if record["status"] != "not configured":
+            raise SystemExit(f"{STEP}: EDA should be off without EDA_EVENT_URL: {record}")
+        payload = build_eda_payload(
+            "restart", "vm-1",
+            [{"tool": "run_module", "arguments": {"module": "ansible.builtin.systemd"}}],
+            {"summary": "unit down"},
+        )
+        if (payload["action"] != "restart" or payload["plan"][0]["tool"] != "run_module"
+                or payload["root_cause"] != "unit down"):
+            raise SystemExit(f"{STEP}: EDA payload wrong: {payload}")
+        os.environ["EDA_EVENT_URL"] = "https://eda.example.com/stream"
+        request = build_eda_request(payload, "u", "p")
+        if request.full_url != "https://eda.example.com/stream":
+            raise SystemExit(f"{STEP}: EDA request url wrong: {request.full_url}")
+        if request.headers.get("Authorization") != "Basic dTpw":
+            raise SystemExit(f"{STEP}: EDA auth header wrong")
+        if json.loads(request.data) != payload:
+            raise SystemExit(f"{STEP}: EDA request body wrong")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     print(f"{STEP}: self-check ok", flush=True)
 
 

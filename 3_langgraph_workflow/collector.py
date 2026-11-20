@@ -51,6 +51,9 @@ MAX_PER_SIGNAL = 200
 # cumulative, so "dummy-crash is present" is not a fault signal — the fault
 # is the increment. A restart resets the counter and clears the fault.
 EVENT_METRICS = ("dummy-crash",)
+# Metrics whose decreases indicate the emitting process restarted
+# (a fresh service.uptime below the previous sample).
+RESTART_METRICS = ("service.uptime",)
 
 
 def _resource_name(resource):
@@ -183,8 +186,14 @@ class TelemetryStore:
                         increased = value > previous if previous is not None else value > 0
                         if increased:
                             entry["metric_events"].append(
-                                {"metric": name, "from": previous or 0, "to": value, "at": received_at}
+                                {"metric": name, "from": previous or 0, "to": value,
+                                 "at": received_at, "kind": "increment"}
                             )
+                    elif name in RESTART_METRICS and previous is not None and value < previous:
+                        entry["metric_events"].append(
+                            {"metric": name, "from": previous, "to": value,
+                             "at": received_at, "kind": "restart"}
+                        )
 
     def record_logs(self, parsed):
         with self._lock:
@@ -221,6 +230,7 @@ class TelemetryStore:
                 return {
                     "ever_seen": False,
                     "last_seen_seconds_ago": None,
+                    "observed_for_seconds": None,
                     "metrics": {},
                     "metric_events": [],
                     "logs": [],
@@ -236,6 +246,7 @@ class TelemetryStore:
                     "metric": item["metric"],
                     "from": item["from"],
                     "to": item["to"],
+                    "kind": item.get("kind", "increment"),
                     "age_seconds": round(now - item["at"], 1),
                 }
                 for item in entry["metric_events"]
@@ -265,6 +276,7 @@ class TelemetryStore:
             return {
                 "ever_seen": True,
                 "last_seen_seconds_ago": round(now - entry["last_seen"], 1),
+                "observed_for_seconds": round(now - entry["first_seen"], 1),
                 "metrics": metrics,
                 "metric_events": metric_events,
                 "logs": logs,
@@ -528,6 +540,17 @@ def self_check():
         sample_metrics_payload("vm-2", {"dummy-crash": 1}), received_at=time.monotonic()))
     if len(store2.window("vm-2", 60)["metric_events"]) != 1:
         raise SystemExit(f"{STEP}: first nonzero observation should be an event")
+    # A decreasing service.uptime means the emitting process restarted.
+    store.record_metrics(parse_metrics(
+        sample_metrics_payload("vm-1", {"service.uptime": 100.0}), received_at=now - 8))
+    store.record_metrics(parse_metrics(
+        sample_metrics_payload("vm-1", {"service.uptime": 3.0}), received_at=now - 5))
+    events = store.window("vm-1", 60)["metric_events"]
+    restarts = [item for item in events if item.get("kind") == "restart"]
+    if len(restarts) != 1 or restarts[0]["to"] != 3.0:
+        raise SystemExit(f"{STEP}: uptime reset not recorded as a restart: {events}")
+    if store.window("vm-1", 60).get("observed_for_seconds") is None:
+        raise SystemExit(f"{STEP}: window missing observed_for_seconds")
     print(f"{STEP}: self-check ok", flush=True)
 
 

@@ -79,7 +79,19 @@ analysis. VMs send telemetry to `aiops-workflow.my-vm-project.svc.cluster.local:
 
 By default the pod runs the **mock** Ansible MCP server in-process
 (`ANSIBLE_MCP_COMMAND`) so the full remediation loop works out of the box;
-set `ANSIBLE_MCP_URL` to a real Ansible MCP server to override it.
+set `ANSIBLE_MCP_URL` to a real Ansible MCP server to override it. To also
+deliver the recommended remediation to Ansible through an EDA event stream,
+set `EDA_EVENT_URL` (plus `EDA_EVENT_USERNAME`/`EDA_EVENT_PASSWORD`); the
+executor posts the plan and root cause there and the dashboard shows the
+delivery status.
+
+The dashboard at `/` is a unified view built **only from telemetry and
+workflow state**: (1) VM status (telemetry freshness, observed-for, signal
+counts), (2) service status per VM (process uptime, restarts detected from
+uptime resets, host CPU/memory, fault flag), (3) anomalies detected,
+(4) RCA output (component, confidence, investigation steps), and (5) the
+recommended remediation with its EDA delivery status, plus the agent
+findings trail.
 
 The manifest embeds the Python sources in a ConfigMap. After changing any
 file in this directory:

@@ -181,71 +181,219 @@ class WorkflowHandler(collector.CollectorHandler):
         super().do_GET()
 
 
+def _fmt_duration(seconds):
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _pill(text, cls):
+    return f'<span class="pill {cls}">{html.escape(str(text))}</span>'
+
+
 def render_workflow_dashboard(store, runs, runs_lock):
+    """Unified dashboard, built only from telemetry and workflow run state:
+
+    (1) VM status (telemetry view), (2) service status per VM, (3) anomalies
+    detected, (4) RCA output, (5) the recommended remediation destined for
+    Ansible through EDA."""
     with runs_lock:
         runs_snapshot = dict(runs)
-    rows = []
-    for service_name in sorted(store.services() or runs_snapshot):
-        run = runs_snapshot.get(service_name)
-        if run is None:
-            status, detail = "no run yet", "waiting for an anomaly"
-        elif run.get("running"):
-            status, detail = "running", "multi-agent workflow in progress"
+
+    window_seconds = 600
+    names = sorted(set(store.services()) | set(runs_snapshot))
+
+    vm_rows, service_rows = [], []
+    for name in names:
+        window = store.window(name, window_seconds)
+        metrics = window.get("metrics", {})
+        logs = window.get("logs", [])
+        traces = window.get("traces", [])
+        events = window.get("metric_events", [])
+        last_seen = window.get("last_seen_seconds_ago")
+        if not window.get("ever_seen"):
+            vm_status = _pill("no telemetry yet", "muted")
+        elif last_seen is not None and last_seen <= state.DEFAULT_SILENCE_SECONDS:
+            vm_status = _pill("telemetry flowing", "ok")
         else:
-            status = run.get("status", "?")
-            anomaly = run.get("anomaly", {})
-            root_cause = run.get("root_cause", {})
-            detail = root_cause.get("summary") or anomaly.get("summary") or ""
-        rows.append(
+            vm_status = _pill(f"silent {last_seen:.0f}s", "bad")
+        observed = window.get("observed_for_seconds")
+        vm_rows.append(
             "<tr>"
-            f"<td>{html.escape(service_name)}</td>"
-            f"<td>{html.escape(str(status))}</td>"
-            f"<td>{html.escape(str(detail)[:300])}</td>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{vm_status}</td>"
+            f"<td>{'-' if last_seen is None else f'{last_seen:.0f}s ago'}</td>"
+            f"<td>{'-' if not observed else _fmt_duration(observed)}</td>"
+            f"<td>{len(metrics)}</td>"
+            f"<td>{len(logs)} ({sum(1 for item in logs if item.get('severity_number', 0) >= 17)} err)</td>"
+            f"<td>{len(traces)} ({sum(1 for item in traces if item.get('status_code') == 2)} failed)</td>"
             "</tr>"
         )
-    body = ("\n".join(rows)) or "<tr><td colspan=\"3\">No telemetry yet.</td></tr>"
+        uptime = metrics.get("service.uptime")
+        restarts = sum(1 for item in events if item.get("metric") == "service.uptime")
+        crash = metrics.get("dummy-crash", 0)
+        fault = _pill(f"fault flag {crash}", "bad") if crash else _pill("clear", "ok")
+        cpu = metrics.get("service.cpu.load")
+        memory = metrics.get("service.memory.load")
+        service_rows.append(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{'-' if uptime is None else _fmt_duration(uptime)}</td>"
+            f"<td>{restarts}</td>"
+            f"<td>{'-' if cpu is None else f'{cpu:.1f}%'}</td>"
+            f"<td>{'-' if memory is None else f'{memory:.1f}%'}</td>"
+            f"<td>{fault}</td>"
+            "</tr>"
+        )
+
+    anomaly_rows, rca_rows, remediation_rows = [], [], []
+    for name in names:
+        run = runs_snapshot.get(name)
+        if not run or run.get("running"):
+            note = "workflow running" if run else "no run yet"
+            cell = _pill(note, "muted")
+            anomaly_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
+                                "<td colspan=\"4\"></td></tr>")
+            rca_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
+                            "<td></td><td></td><td></td></tr>")
+            remediation_rows.append(f"<tr><td>{html.escape(name)}</td><td>{cell}</td>"
+                                    "<td></td><td></td><td></td></tr>")
+            continue
+        anomaly = run.get("anomaly", {})
+        detected = anomaly.get("detected")
+        status = _pill("anomaly", "bad") if detected else _pill("healthy", "ok")
+        anomaly_rows.append(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{status}</td>"
+            f"<td>{html.escape(', '.join(anomaly.get('signals', [])) or '-')}</td>"
+            f"<td>{html.escape(str(anomaly.get('severity', '-')))}</td>"
+            f"<td>{html.escape(str(anomaly.get('summary', ''))[:220])}</td>"
+            f"<td>{run.get('attempts', 0)}/{run.get('max_attempts', state.DEFAULT_MAX_ATTEMPTS)}</td>"
+            "</tr>"
+        )
+        root_cause = run.get("root_cause", {})
+        confidence = root_cause.get("confidence", "n/a")
+        cls = "ok" if confidence == "high" else ("warn" if confidence == "medium" else "muted")
+        rca_rows.append(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{html.escape(str(root_cause.get('component', '-')))}</td>"
+            f"<td>{_pill(confidence, cls)}</td>"
+            f"<td>{html.escape(str(root_cause.get('summary', ''))[:300])}</td>"
+            f"<td>{len(run.get('investigation', []))}</td>"
+            "</tr>"
+        )
+        remediation = run.get("remediation", {})
+        plan = remediation.get("plan", [])
+        plan_html = "<br>".join(
+            f"{index + 1}. {html.escape(step.get('tool', ''))} "
+            f"{html.escape(json.dumps(step.get('arguments', {})))[:120]}"
+            for index, step in enumerate(plan)
+        ) or "none"
+        result = run.get("remediation_result", {})
+        if result.get("ok"):
+            result_pill = _pill("executed ok", "ok")
+        elif result:
+            result_pill = _pill("failed", "bad")
+        else:
+            result_pill = _pill("pending", "muted")
+        eda = (result.get("eda") or {}).get("status", "not configured")
+        remediation_rows.append(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{plan_html}</td>"
+            f"<td>{result.get('attempts', run.get('attempts', 0))}</td>"
+            f"<td>{result_pill}</td>"
+            f"<td>{html.escape(str(eda))}</td>"
+            "</tr>"
+        )
+
     findings_rows = []
-    for service_name in sorted(runs_snapshot):
-        run = runs_snapshot[service_name]
+    for name in sorted(runs_snapshot):
+        run = runs_snapshot[name]
         if not run or run.get("running"):
             continue
         for line in run.get("findings", [])[-12:]:
             findings_rows.append(
-                f"<tr><td>{html.escape(service_name)}</td><td>{html.escape(line)}</td></tr>"
+                f"<tr><td>{html.escape(name)}</td><td>{html.escape(line)}</td></tr>"
             )
     findings_body = ("\n".join(findings_rows)) or "<tr><td colspan=\"2\">No agent findings yet.</td></tr>"
+    llm_state = "on" if llm.available() else "off (heuristic fallback)"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="5">
-  <title>AIOps multi-agent workflow</title>
+  <title>AIOps unified view</title>
   <style>
     body {{ font-family: "Segoe UI", Helvetica, Arial, sans-serif; margin: 2rem; background: #f4f6f8; color: #1f2933; }}
-    main {{ max-width: 72rem; }}
-    table {{ width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 2rem; }}
-    th, td {{ border: 1px solid #e2e8f0; padding: 0.6rem 0.8rem; text-align: left; vertical-align: top; }}
+    main {{ max-width: 76rem; }}
+    h2 {{ margin: 2rem 0 0.5rem; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; }}
+    th, td {{ border: 1px solid #e2e8f0; padding: 0.5rem 0.8rem; text-align: left; vertical-align: top; }}
     th {{ background: #eef2f6; }}
-    td:nth-child(2) {{ white-space: nowrap; }}
+    .pill {{ padding: 0.05rem 0.55rem; border-radius: 999px; font-size: 0.85rem; white-space: nowrap; }}
+    .ok {{ background: #dff5e7; color: #0f7b3a; }}
+    .bad {{ background: #fde5e2; color: #b42318; }}
+    .warn {{ background: #fdf0d7; color: #a15c00; }}
+    .muted {{ background: #eef2f6; color: #52606d; }}
+    p.meta {{ color: #52606d; }}
   </style>
 </head>
 <body>
   <main>
-    <h1>AIOps multi-agent workflow</h1>
-    <p>collector: {len(store.services())} services &middot; llm: {"on" if llm.available() else "off (heuristic fallback)"}</p>
+    <h1>AIOps unified view &mdash; autonomous remediation</h1>
+    <p class="meta">{len(names)} services &middot; built from telemetry only &middot; llm: {llm_state}</p>
+
+    <h2>1. Status of VMs (telemetry view)</h2>
     <table>
-      <thead><tr><th>Service</th><th>Status</th><th>Detail</th></tr></thead>
-      <tbody>{body}</tbody>
+      <thead><tr><th>VM</th><th>Telemetry</th><th>Last export</th><th>Observed for</th><th>Metrics</th><th>Logs</th><th>Traces</th></tr></thead>
+      <tbody>{''.join(vm_rows) or no_telemetry_row(7)}</tbody>
     </table>
+
+    <h2>2. Service status per VM (telemetry view)</h2>
+    <table>
+      <thead><tr><th>VM</th><th>Process uptime</th><th>Restarts (10m)</th><th>Host CPU</th><th>Host memory</th><th>Fault state</th></tr></thead>
+      <tbody>{''.join(service_rows) or no_telemetry_row(6)}</tbody>
+    </table>
+
+    <h2>3. Anomalies detected</h2>
+    <table>
+      <thead><tr><th>VM</th><th>Status</th><th>Signals</th><th>Severity</th><th>Summary</th><th>Attempts</th></tr></thead>
+      <tbody>{''.join(anomaly_rows)}</tbody>
+    </table>
+
+    <h2>4. RCA output</h2>
+    <table>
+      <thead><tr><th>VM</th><th>Component</th><th>Confidence</th><th>Root cause</th><th>Steps</th></tr></thead>
+      <tbody>{''.join(rca_rows)}</tbody>
+    </table>
+
+    <h2>5. Recommended remediation &rarr; Ansible (EDA)</h2>
+    <table>
+      <thead><tr><th>VM</th><th>Plan</th><th>Attempts</th><th>Execution</th><th>EDA delivery</th></tr></thead>
+      <tbody>{''.join(remediation_rows)}</tbody>
+    </table>
+
     <h2>Agent findings (latest run, newest last)</h2>
     <table>
-      <thead><tr><th>Service</th><th>Finding</th></tr></thead>
+      <thead><tr><th>VM</th><th>Finding</th></tr></thead>
       <tbody>{findings_body}</tbody>
     </table>
   </main>
 </body>
 </html>
 """
+
+
+def no_telemetry_row(columns):
+    return f"<tr><td colspan=\"{columns}\">No telemetry collected yet.</td></tr>"
 
 
 def serve_forever(args):
@@ -369,6 +517,38 @@ def self_check():
     for module in (state, llm, mock_mcp_server, mcp_client, collector, anomaly_detector,
                    root_cause_analyzer, remediation_selector, graph):
         module.self_check()
+
+    # The unified dashboard renders all five sections from telemetry + runs.
+    store = collector.TelemetryStore()
+    now = time.monotonic()
+    store.record_metrics(collector.parse_metrics(
+        collector.sample_metrics_payload(
+            "vm-1", {"service.uptime": 42.0, "service.cpu.load": 3.0,
+                     "service.memory.load": 12.0, "dummy-crash": 1}),
+        received_at=now - 2))
+    run = state.initial_state("vm-1", telemetry={})
+    run.update({
+        "status": state.STATUS_REMEDIATED,
+        "anomaly": {"detected": True, "signals": ["metrics-silent"], "severity": "high",
+                    "summary": "no telemetry for 42s"},
+        "root_cause": {"found": True, "component": "aiops-demo.service",
+                       "confidence": "high", "summary": "unit is down"},
+        "remediation": {"plan": [{"tool": "run_module",
+                                  "arguments": {"module": "ansible.builtin.systemd"},
+                                  "rationale": "restart"}], "rationale": ""},
+        "remediation_result": {"ok": True, "attempts": 1, "steps": [],
+                               "eda": {"status": "not configured"}},
+        "investigation": [{"iteration": 1, "tool": "get_service_status"}],
+        "findings": ["[agent 1 anomaly detector] example"],
+    })
+    page = render_workflow_dashboard(store, {"vm-1": run}, threading.Lock())
+    for expected in ("vm-1", "Status of VMs", "Service status per VM", "Anomalies detected",
+                     "RCA output", "Recommended remediation", "Ansible (EDA)",
+                     "telemetry flowing", "aiops-demo.service", "run_module",
+                     "not configured", "fault flag 1"):
+        if expected not in page:
+            raise SystemExit(f"{STEP}: dashboard missing {expected!r}")
+
     final = run_offline_demo()
     if final.get("status") != state.STATUS_REMEDIATED:
         raise SystemExit(f"{STEP}: offline demo should end REMEDIATED, got {final.get('status')}")

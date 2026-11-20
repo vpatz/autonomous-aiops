@@ -73,6 +73,13 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   default = collector + poller + dashboard on :4318). `graph.build_graph()` wires the
   agents; nodes route with LangGraph `Command(goto=...)`, and `investigation`/`findings`
   are append-only state channels (the audit trail the dashboard shows).
+- The unified dashboard (`render_workflow_dashboard` in `workflow.py`) is built **only
+  from telemetry and run state** — it never queries the Kubernetes API or MCP servers.
+  VM status is telemetry freshness; service restarts are detected from decreasing
+  `service.uptime` samples (collector records them as `metric_events` with
+  `kind: restart`). The executor optionally posts the recommended remediation to an
+  EDA event stream when `EDA_EVENT_URL` is set (stage-2 conventions: basic auth,
+  `aiops-demo` user); the dashboard shows the delivery status.
 - Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the seven demo scenarios
   (kill/restart service, stop network 60s, restart/shutdown VM, block telemetry 30s,
   fake telemetry). In-VM commands run over `oc virt ssh` (requires the oc-virt plugin
