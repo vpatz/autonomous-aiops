@@ -289,9 +289,12 @@ def render_dashboard_shell():
     .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.1rem;
             padding: 1rem 2rem 2rem; max-width: 78rem; margin: 0 auto; }
     @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
-    .card { background: var(--card); border: 1px solid var(--edge); border-radius: 16px;
-            padding: 1rem 1.2rem 1.1rem; box-shadow: 0 14px 34px rgba(0,0,0,.35);
+    .card { background: var(--card); border: 1px solid var(--edge); border-left: 4px solid var(--edge);
+            border-radius: 16px; padding: 1rem 1.2rem 1.1rem; box-shadow: 0 14px 34px rgba(0,0,0,.35);
             animation: cardIn .5s cubic-bezier(.2,.7,.3,1) both; }
+    .card.vm-flowing { border-left-color: var(--ok); }
+    .card.vm-silent { border-left-color: var(--bad); }
+    .card.vm-none { border-left-color: var(--muted); }
     @keyframes cardIn { from { opacity: 0; transform: translateY(12px); }
                         to { opacity: 1; transform: none; } }
     .card-head { display: flex; justify-content: space-between; align-items: center; }
@@ -489,13 +492,6 @@ def render_dashboard_shell():
       dials.appendChild(side);
       root.appendChild(dials);
 
-      const fresh = el('div', 'kv');
-      fresh.appendChild(el('div', 'label', 'telemetry freshness'));
-      const freshFill = bar(fresh);
-      const freshText = el('div', 'k', '');
-      fresh.appendChild(freshText);
-      root.appendChild(fresh);
-
       root.appendChild(el('hr', 'sep'));
 
       const anomalyRow = row(root, 'anomaly');
@@ -528,7 +524,6 @@ def render_dashboard_shell():
       cardsRoot.appendChild(root);
       return { root: root, status: status, cpu: cpu, mem: mem, uptime: uptime,
                restarts: restarts, signals: signals, fault: fault,
-               freshFill: freshFill, freshText: freshText,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
                rcaText: rcaText, rcaFill: rcaFill,
                remText: remText, remFill: remFill, edaChip: edaChip,
@@ -543,9 +538,16 @@ def render_dashboard_shell():
 
     function updateCard(svc, refs) {
       const vm = svc.vm, service = svc.service;
-      if (vm.status === 'flowing') setPill(refs.status, 'ok', 'telemetry flowing', true);
-      else if (vm.status === 'silent') setPill(refs.status, 'bad', 'silent ' + Math.round(vm.last_seen_seconds_ago) + 's', true);
-      else setPill(refs.status, 'muted', 'no telemetry yet', false);
+      // VM status is color-coded on the card itself; cards are never
+      // removed for a down VM, so the last known state stays visible.
+      refs.root.className = 'card vm-' + vm.status;
+      if (vm.status === 'flowing') {
+        setPill(refs.status, 'ok', 'flowing · ' + Math.round(vm.last_seen_seconds_ago) + 's ago', true);
+      } else if (vm.status === 'silent') {
+        setPill(refs.status, 'bad', 'silent · ' + Math.round(vm.last_seen_seconds_ago) + 's', true);
+      } else {
+        setPill(refs.status, 'muted', 'no telemetry yet', false);
+      }
       refs.cpu.set(service.cpu, '%');
       refs.mem.set(service.memory, '%');
       refs.uptime.textContent = fmtDuration(service.uptime);
@@ -553,11 +555,6 @@ def render_dashboard_shell():
       refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
       refs.fault.textContent = service.fault > 0 ? String(service.fault) : 'clear';
       refs.fault.style.color = service.fault > 0 ? 'var(--bad)' : 'var(--ok)';
-      const observed = vm.observed_for_seconds || 0;
-      const freshPct = Math.max(4, 100 - Math.min(100, ((vm.last_seen_seconds_ago == null ? 600 : vm.last_seen_seconds_ago) / Math.max(observed, 60)) * 100));
-      refs.freshFill.style.width = freshPct.toFixed(1) + '%';
-      refs.freshFill.style.background = vm.status === 'flowing' ? 'var(--ok)' : 'var(--bad)';
-      refs.freshText.textContent = vm.last_seen_seconds_ago == null ? '-' : Math.round(vm.last_seen_seconds_ago) + 's ago · observed ' + fmtDuration(observed);
 
       // Message feed: updated on every poll, regardless of run state.
       const lines = (svc.messages || []).map(function (m) {
@@ -613,15 +610,12 @@ def render_dashboard_shell():
       statsEl.textContent = data.services.length + ' VMs · ' + flowing + ' flowing · ' +
         anomalies + ' anomaly · llm ' + (data.meta.llm ? 'on' : 'off') +
         ' · updated ' + new Date(data.meta.generated_at).toLocaleTimeString();
-      const live = new Set();
+      // Cards are created on first sight and never removed: a VM that goes
+      // down keeps its card (color-coded red) with the last known state.
       data.services.forEach(function (svc) {
-        live.add(svc.name);
         let refs = cards.get(svc.name);
         if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
         updateCard(svc, refs);
-      });
-      cards.forEach(function (refs, name) {
-        if (!live.has(name)) { refs.root.remove(); cards.delete(name); }
       });
       findingsEl.textContent = '';
       data.findings.forEach(function (item) {
@@ -815,9 +809,14 @@ def self_check():
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
                    "repeat(2, 1fr)", "cardIn", "animationDelay", "textarea", "messages",
-                   "not detected"):
+                   "not detected", "vm-flowing", "vm-silent"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
+    # Cards must never be removed for a down VM, and the status bar is
+    # replaced by the card's color code.
+    for absent in ("cards.delete", "freshFill", "telemetry freshness"):
+        if absent in shell:
+            raise SystemExit(f"{STEP}: dashboard shell still contains {absent!r}")
     # The message feed must update before the run-state early returns, or
     # cards without a run never fill the text area.
     if not shell.index("msgBox.value") < shell.index("const run = svc.run"):

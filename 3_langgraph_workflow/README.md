@@ -139,13 +139,15 @@ configured, and the findings trail names the tool the model chose at each
 iteration.
 
 The dashboard at `/` is a card-based view built **only from telemetry and
-workflow state**: cards flow two per row, each with rotating dial gauges for
-host CPU and memory, a telemetry-freshness bar, process uptime and restart
-counts, the workflow rows — anomaly badge, RCA summary with a confidence
-bar, and the recommended remediation with an attempts bar and its EDA
-delivery chip — and a text area showing the last 30 seconds of messages
-received from that VM (every OTLP metrics/log/span export becomes one line
-in the collector's per-service message feed). The page polls
+workflow state**: cards flow two per row and are never removed when a VM
+goes down — the card stays, color-coded by status (green accent while
+telemetry flows, red while silent, with the age in the status pill). Each
+card has rotating dial gauges for host CPU and memory, process uptime and
+restart counts, the workflow rows — anomaly badge, RCA summary with a
+confidence bar, and the recommended remediation with an attempts bar and
+its EDA delivery chip — and a text area showing the last 30 seconds of
+messages received from that VM (every OTLP metrics/log/span export becomes
+one line in the collector's per-service message feed). The page polls
 `/api/dashboard` every 5 seconds and updates the cards in place, so needles
 and bars animate smoothly; `/api/dashboard` and `/runs` are plain JSON for
 scripting.
