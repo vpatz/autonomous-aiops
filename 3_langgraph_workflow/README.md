@@ -190,8 +190,16 @@ oc apply -f 3_langgraph_workflow/workflow-pod.yaml
 
 What changes with the LLM on:
 
-- **anomaly detector** — triggering stays deterministic (identical with or
-  without a model); the model only phrases the incident summary.
+- **anomaly detector** — the model checks observed VMs for incidents beyond
+  the built-in rules, even when no rule fires. Each live detector prompt includes
+  every OTLP metric, log and trace resource received from that VM in the last
+  30 seconds, in receipt order, with timestamps, attributes and all data points
+  preserved in protobuf JSON. Recovery checks further restrict this to exports
+  received after the action. There is no record cap or prompt truncation: if
+  the window exceeds the model's context limit, detection falls back to rules.
+  The rule engine still uses its configured workflow window. A positive
+  verdict must cite evidence keys from that window. The `llm-anomaly`
+  signal and explanation are recorded and routed to RCA.
 - **root cause analyzer (inner loop)** — each iteration asks the model for
   the next action as a JSON decision (`call_tool` with arguments, or
   `conclude` with a root cause) over the *live* MCP `tools/list` catalog,
@@ -255,8 +263,8 @@ budget), `--cooldown-seconds`, `--verify-wait-seconds`.
 
 - **anomaly_detector** (agent 1): deterministic triggers over the telemetry
   window (silence, ERROR logs, failed spans, dummy-crash counter, CPU/memory
-  saturation). The LLM only phrases the summary; triggering is identical
-  with or without a model.
+  saturation). Model findings can add an anomaly but cannot clear a rule
+  trigger. An unavailable model or invalid response falls back to the rules.
 - **root_cause_analyzer** (agent 2): the inner loop. With an LLM, each
   iteration chooses the next MCP tool call from the live `tools/list`
   result; without one, a deterministic playbook runs `systemctl status` and

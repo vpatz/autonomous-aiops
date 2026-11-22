@@ -145,6 +145,7 @@ def build_deps(args, store=None):
         verify_wait_seconds=args.verify_wait_seconds,
         deliver=deliver,
         is_vm_halted=confirmed_halted if deliver else None,
+        get_evidence=store.recent_evidence if store is not None else None,
     )
     return app, linux, ansible
 
@@ -778,11 +779,17 @@ def serve_forever(args):
     finished_at = {}
 
     def run_for_service(service_name):
-        with WorkflowHandler.runs_lock:
-            WorkflowHandler.runs[service_name] = {"running": True}
+        incident = False
         try:
-            app, linux, ansible = build_deps(args, store=store)
             telemetry = store.window(service_name, args.window_seconds)
+            anomaly = anomaly_detector.detect_window(service_name, telemetry, args.silence_seconds,
+                                                      get_evidence=store.recent_evidence)
+            if not anomaly["detected"]:
+                return
+            incident = True
+            with WorkflowHandler.runs_lock:
+                WorkflowHandler.runs[service_name] = {"running": True}
+            app, linux, ansible = build_deps(args, store=store)
             workflow_state = state.initial_state(
                 service_name,
                 window_seconds=args.window_seconds,
@@ -790,6 +797,7 @@ def serve_forever(args):
                 max_iterations=args.max_iterations,
                 max_attempts=args.max_attempts,
             )
+            workflow_state["anomaly"] = anomaly
             final = graph.run(app, workflow_state, label=service_name)
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
@@ -799,8 +807,9 @@ def serve_forever(args):
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = {"running": False, "status": "error", "error": str(exc)}
         finally:
+            if incident:
+                finished_at[service_name] = time.monotonic()
             running.discard(service_name)
-            finished_at[service_name] = time.monotonic()
 
     print(f"{STEP}: poller started (window={args.window_seconds}s silence={args.silence_seconds}s "
           f"cooldown={args.cooldown_seconds}s)", flush=True)
@@ -812,16 +821,12 @@ def serve_forever(args):
                     continue
                 if time.monotonic() - finished_at.get(service_name, 0) < args.cooldown_seconds:
                     continue
-                window = store.window(service_name, args.window_seconds)
-                quick = anomaly_detector.analyze_window(window, args.silence_seconds)
-                if quick["detected"]:
-                    print(f"{STEP}: anomaly detected for {service_name} "
-                          f"({','.join(quick['signals'])}); starting workflow run", flush=True)
-                    running.add(service_name)
-                    threading.Thread(
-                        target=run_for_service, args=(service_name,), daemon=True,
-                        name=f"run-{service_name}",
-                    ).start()
+                # Model latency on one VM must not stall checks on other VMs.
+                running.add(service_name)
+                threading.Thread(
+                    target=run_for_service, args=(service_name,), daemon=True,
+                    name=f"run-{service_name}",
+                ).start()
     except KeyboardInterrupt:
         print(f"{STEP}: stopped", flush=True)
     finally:
@@ -847,7 +852,8 @@ def run_once(args):
                 if not store.window(service_name, 1)["ever_seen"]:
                     continue
                 window = store.window(service_name, args.window_seconds)
-                quick = anomaly_detector.analyze_window(window, args.silence_seconds)
+                quick = anomaly_detector.detect_window(service_name, window, args.silence_seconds,
+                                                       get_evidence=store.recent_evidence)
                 if quick["detected"]:
                     target = service_name
                     print(f"{STEP}: anomaly detected for {service_name}: {quick['summary']}", flush=True)
@@ -862,14 +868,15 @@ def run_once(args):
         # be able to push while the graph executes.
         app, linux, ansible = build_deps(args, store=store)
         try:
-            telemetry = store.window(target, args.window_seconds)
-            final = graph.run(app, state.initial_state(
+            initial = state.initial_state(
                 target,
                 window_seconds=args.window_seconds,
-                telemetry=telemetry,
+                telemetry=window,
                 max_iterations=args.max_iterations,
                 max_attempts=args.max_attempts,
-            ), label=target)
+            )
+            initial["anomaly"] = quick
+            final = graph.run(app, initial, label=target)
             print(f"{STEP}: final status: {(final or {}).get('status')}", flush=True)
             return final
         finally:
@@ -883,6 +890,31 @@ def self_check():
     for module in (state, llm, mock_mcp_server, mcp_client, collector, anomaly_detector,
                    root_cause_analyzer, remediation_selector, graph):
         module.self_check()
+
+    # Capture the actual model message across all three OTLP ingestion paths.
+    from unittest.mock import patch
+    history = collector.TelemetryStore()
+    now = time.monotonic()
+    for age, vm in [(35, "vm-1"), (20, "vm-1"), (2, "vm-1"), (1, "vm-2")]:
+        history.record_metrics(collector.parse_metrics(
+            collector.sample_metrics_payload(vm, {"custom.gauge": age}),
+            received_at=now-age, retain=history.retain_export))
+    body = "full log " * 32
+    for _ in range(201):
+        history.record_logs(collector.parse_logs(collector.sample_logs_payload("vm-1", body),
+                            received_at=now-1, retain=history.retain_export))
+    history.record_traces(collector.parse_traces(collector.sample_traces_payload("vm-1"),
+                          received_at=now-1, retain=history.retain_export))
+    with patch.object(llm, "available", return_value=True), patch.object(
+            llm, "chat_json", return_value={"detected": False}) as chat:
+        anomaly_detector.detect_window("vm-1", history.window("vm-1", 120), 10,
+                                       get_evidence=history.recent_evidence)
+        evidence = json.loads(chat.call_args.args[0][1]["content"])["evidence"]
+        assert sum(k.startswith("metrics:") for k in evidence) == 2
+        assert sum(k.startswith("logs:") for k in evidence) == 201
+        assert sum(k.startswith("traces:") for k in evidence) == 1
+        assert body in json.dumps(evidence) and "custom.gauge" in json.dumps(evidence)
+        assert not any(k.startswith("metrics:") for k in history.recent_evidence("vm-1", since=now-1))
 
     # The dashboard data carries telemetry + run state; the shell polls it.
     store = collector.TelemetryStore()

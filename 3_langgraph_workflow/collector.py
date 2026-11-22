@@ -79,7 +79,7 @@ def _maybe_gzip(payload, content_encoding):
     return payload
 
 
-def parse_metrics(payload, content_encoding=None, received_at=None):
+def parse_metrics(payload, content_encoding=None, received_at=None, retain=None):
     """Parse an OTLP metrics export into [(service_name, {metric: value})]."""
     request = ExportMetricsServiceRequest()
     request.ParseFromString(_maybe_gzip(payload, content_encoding))
@@ -87,6 +87,8 @@ def parse_metrics(payload, content_encoding=None, received_at=None):
     parsed = []
     for resource_metrics in request.resource_metrics:
         service_name = _resource_name(resource_metrics.resource)
+        if retain is not None:
+            retain(service_name, "metrics", resource_metrics, received_at)
         metrics = {}
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
@@ -104,7 +106,7 @@ def parse_metrics(payload, content_encoding=None, received_at=None):
     return parsed
 
 
-def parse_logs(payload, content_encoding=None, received_at=None):
+def parse_logs(payload, content_encoding=None, received_at=None, retain=None):
     """Parse an OTLP logs export into [(service_name, [log entry dicts])]."""
     request = ExportLogsServiceRequest()
     request.ParseFromString(_maybe_gzip(payload, content_encoding))
@@ -112,6 +114,8 @@ def parse_logs(payload, content_encoding=None, received_at=None):
     parsed = []
     for resource_logs in request.resource_logs:
         service_name = _resource_name(resource_logs.resource)
+        if retain is not None:
+            retain(service_name, "logs", resource_logs, received_at)
         entries = []
         for scope_logs in resource_logs.scope_logs:
             for record in scope_logs.log_records:
@@ -128,7 +132,7 @@ def parse_logs(payload, content_encoding=None, received_at=None):
     return parsed
 
 
-def parse_traces(payload, content_encoding=None, received_at=None):
+def parse_traces(payload, content_encoding=None, received_at=None, retain=None):
     """Parse an OTLP traces export into [(service_name, [span dicts])]."""
     request = ExportTraceServiceRequest()
     request.ParseFromString(_maybe_gzip(payload, content_encoding))
@@ -136,6 +140,8 @@ def parse_traces(payload, content_encoding=None, received_at=None):
     parsed = []
     for resource_spans in request.resource_spans:
         service_name = _resource_name(resource_spans.resource)
+        if retain is not None:
+            retain(service_name, "traces", resource_spans, received_at)
         spans = []
         for scope_spans in resource_spans.scope_spans:
             for span in scope_spans.spans:
@@ -177,6 +183,36 @@ class TelemetryStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._services = {}
+        # Full protobuf resources for anomaly-model evidence. Time buckets keep
+        # retention independent of traffic volume and the dashboard's deque caps.
+        self._exports = {}
+
+    def _expire_exports(self, cutoff):
+        for second in list(self._exports):
+            if second < int(cutoff):
+                del self._exports[second]
+
+    def retain_export(self, service, signal, resource, received_at):
+        with self._lock:
+            cutoff = time.monotonic() - 30
+            self._expire_exports(cutoff)
+            if received_at >= cutoff:
+                self._exports.setdefault(int(received_at), []).append(
+                    (received_at, service, signal, resource))
+
+    def recent_evidence(self, service, since=0):
+        """All resource exports for one VM in receipt order; convert outside the lock."""
+        from google.protobuf.json_format import MessageToDict
+
+        now = time.monotonic()
+        with self._lock:
+            self._expire_exports(now - 30)
+            cutoff = max(now - 30, since)
+            records = [r for bucket in self._exports.values() for r in bucket
+                       if r[1] == service and cutoff <= r[0] <= now]
+        return {f"{signal}:{i}": {"age_seconds": round(now - at, 3),
+                                  "otlp": MessageToDict(resource)}
+                for i, (at, _, signal, resource) in enumerate(sorted(records, key=lambda r: r[0]))}
 
     def _entry(self, service_name):
         if service_name not in self._services:
@@ -413,15 +449,15 @@ class CollectorHandler(BaseHTTPRequestHandler):
         payload = self.rfile.read(length)
         encoding = self.headers.get("Content-Encoding")
         if path in ("/v1/metrics", "/"):
-            parsed = parse_metrics(payload, encoding)
+            parsed = parse_metrics(payload, encoding, retain=self.store.retain_export)
             self.store.record_metrics(parsed)
             response = ExportMetricsServiceResponse().SerializeToString()
         elif path == "/v1/logs":
-            parsed = parse_logs(payload, encoding)
+            parsed = parse_logs(payload, encoding, retain=self.store.retain_export)
             self.store.record_logs(parsed)
             response = ExportLogsServiceResponse().SerializeToString()
         elif path == "/v1/traces":
-            parsed = parse_traces(payload, encoding)
+            parsed = parse_traces(payload, encoding, retain=self.store.retain_export)
             self.store.record_traces(parsed)
             response = ExportTraceServiceResponse().SerializeToString()
         else:
