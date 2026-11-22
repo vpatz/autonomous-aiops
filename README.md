@@ -1,120 +1,83 @@
-# autonomous-aiops
+# Autonomous AIOps demo
 
-A multi-agent ITOps workflow for Autonomous Remediation from Unknown
-Scenarios.
+Four RHEL VMs on OpenShift Virtualization run a Flask service. A separate load-generator pod calls those services, and a LangGraph workflow compares **what each VM reports** with **what its clients experience**. When it detects an incident, it investigates the affected VM, selects an approved recovery action where available, and checks fresh telemetry to see whether the action worked.
 
-In production deployments running mission critical applications, it is
-necessary to predict anomalies, their root causes and apply remediation to
-ensure smooth running of IT infrastructure. This repo demonstrates a
-multi-agent workflow that remediates error states in a multi-node
-distributed system:
+## Try it offline
 
-- OpenTelemetry sends **metrics, logs and traces** from services running in
-  RHEL VMs (OpenShift Virtualization) to a telemetry collector.
-- Time windows of that telemetry are examined by the **anomaly detector
-  agent**, which triggers the **root cause analysis agent**.
-- The RCA agent autonomously iterates to dig deeper through **MCP servers**
-  (inner loop): the linux-mcp server runs commands and reads files on the
-  affected VM (`systemctl status`, `journalctl`, ...).
-- The **remediation selector** chooses a recovery action for the affected VM.
-  In the cluster demo, Event-Driven Ansible (EDA) routes the event to a
-  controller job. The agent checks fresh telemetry to verify recovery.
-
-The workflow is implemented as a LangGraph `StateGraph`; every iteration of
-every agent is kept in an append-only audit trail that drives the demo
-dashboard.
-
-```
-                         OTLP/HTTP (metrics, logs, traces)
-   1_vm_services ─────────────────────────────────────────────► 3_langgraph_workflow
-                                                                  collector (:4318)
-                                                                  anomaly_detector (agent 1)
-                                                                    │ anomaly
-                                                                    ▼
-                                                        root_cause_analyzer (agent 2)
-                                                        inner loop ──► linux-mcp
-                                                                    │ root cause
-                                                                    ▼
-                                                        remediation_selector (agent 3)
-                                                                    │ approved plan
-                                                                    ▼
-                                                        remediation_executor ──► EDA ──► Ansible job
-                                                                    │
-                                                        outer loop: verify ──► agent 1
-```
-
-The two rules in [`rulebooks/restart-aiops.yml`](rulebooks/restart-aiops.yml)
-handle different failures:
-
-| Fault | EDA action | Controller job |
-| --- | --- | --- |
-| `aiops-demo.service` is down on a running VM | `restart` | [Start the unit](playbooks/restore-aiops.yml) on that VM over SSH. |
-| A previously reporting VM goes silent and KubeVirt confirms it is halted | `restart_vm` | [Start the VM](playbooks/restore-vm.yml) through the KubeVirt API. |
-
-Both jobs are limited to one named demo VM. Duplicate events leave a running
-unit or VM alone. Other chaos scenarios exercise detection and investigation;
-not every anomaly has an approved recovery action.
-
-## Quick demo (offline, no cluster needed)
+From the repository root, run:
 
 ```sh
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install -r 3_langgraph_workflow/requirements.txt
 python3 3_langgraph_workflow/workflow.py --demo
 python3 3_langgraph_workflow/workflow.py --self-check
 ```
 
-`--demo` uses synthetic telemetry and mock MCP servers. It prints the full sequence: anomaly
-detection, two MCP-backed investigation iterations, the root cause, the
-approved remediation plan, its execution, and the verification pass.
+`--demo` walks through a killed service, from telemetry silence to verified recovery, using synthetic telemetry and mock MCP tools. It needs no cluster, model endpoint, or Ansible installation. For a local run with **real** Flask telemetry, see the [workflow guide](3_langgraph_workflow/README.md#local-end-to-end-with-real-telemetry).
 
-See [3_langgraph_workflow/README.md](3_langgraph_workflow/README.md) for
-local end-to-end runs with real telemetry, configuration (LLM, MCP
-servers), and the deployed mode, and
-[4_chaos_injector/README.md](4_chaos_injector/README.md) for injecting
-failure scenarios (kill service, stop network, restart/shutdown VM, block or
-corrupt telemetry) into the VMs.
+## How the live demo works
 
-## Infra setup (OpenShift Virtualization)
+```text
+Load-generator pod ── GET / or /health ──► Flask service on a randomly selected VM
+        │                                         │
+        │ HTTP outcomes per VM per second         │ guest metrics, logs and request spans
+        └─────────── OTLP/HTTP ───────────────────┴──► aiops-workflow:4318
+                                                        collector + dashboard
+                                                        detector → RCA → selector → executor
+                                                           ▲                            │
+                                                           └── post-action telemetry ───┘
+```
 
-For a fresh cluster, start with the [reference cluster snapshot and rebuild
-guide](0_cluster_setup/README.md). It covers platform prerequisites, AAP rulebook
-activation and MLflow before the application deployment below.
+- **Traffic and telemetry.** Across all four VMs, the generator targets 1 request/s, adds 5 each second up to 500/s, holds for 10 seconds, then repeats. Every five seconds it sends HTTP status counts for each VM and second. `no_response` means the client got no HTTP status; an empty count means no requests completed. These reports never refresh the guest heartbeat. The VM itself exports metrics every five seconds, including host CPU, memory, process uptime, and `service.requests.active` (requests in flight at collection time, not requests/s).
+- **Detection.** Rules catch known signals such as telemetry silence, failed spans, and resource pressure. When configured, the anomaly detector also sends the LLM the last **30 seconds** of OTLP data received for that VM, including the generator’s client observations. The model can flag an additional incident by citing evidence. If the model is unavailable or its response is invalid, the rules still apply.
+- **Investigation and recovery.** The root-cause agent uses Linux MCP tools to check evidence such as systemd status and journal logs. With Event-Driven Ansible (EDA) configured, a high-confidence diagnosis can trigger one of the two recovery actions below. The stock deployment without EDA uses mock Ansible execution. EDA accepting an event is not proof of recovery: check the controller job and telemetry received after the action.
 
-1. Create the secret the linux-mcp server uses to reach the VMs (private
-   keys never live in this repo):
-   `ssh-keygen -t ed25519 -f mcp_id_ed25519 -C mcp@rhel`
-   `oc create secret generic linux-mcp-ssh -n my-vm-project --from-file=id_ed25519=mcp_id_ed25519`
-   Then add the matching public key to `ssh_authorized_keys` and set the VM
-   console password in the `rhel9-cloudinit` userdata of
-   `1_vm_services/vm-deploy.yaml`.
-2. Deploy the VMs and the linux-mcp server:
-   `oc apply -f 1_vm_services/vm-deploy.yaml`
-   (4 RHEL 10 VMs; each boots, clones this repo and runs
-   `1_vm_services/service.py` as `aiops-demo.service`, pushing telemetry to
-   `http://aiops-workflow.my-vm-project.svc.cluster.local:4318`)
-3. Deploy the multi-agent workflow:
-   `oc apply -f 3_langgraph_workflow/workflow-pod.yaml`
-   (collector + agents + dashboard on :4318; talks to linux-mcp in-cluster)
-4. For real recovery, configure the AAP event stream, rulebook activation,
-   controller templates and `eda-config` Secret as described in the
-   [workflow setup](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible).
-   `EDA_EVENT_URL` selects EDA **instead of** Ansible MCP execution; without it
-   the stock pod uses a mock executor. The optional `llm-config` Secret enables
-   model-assisted investigation.
-5. The services run cleanly, pushing telemetry only. Inject failures with
-   `4_chaos_injector/chaos_injector.py` (kill a service, stop network,
-   restart/shutdown a VM, block or corrupt telemetry, or stress the host).
-   Watch the agent output and telemetry on the unified
-   dashboard at the `aiops-workflow` route.
+| Confirmed condition | EDA action | Controller job |
+| --- | --- | --- |
+| `aiops-demo.service` is down on a running VM | `restart` | [Start the systemd unit over SSH](playbooks/restore-aiops.yml) |
+| A previously reporting VM goes silent and KubeVirt confirms it is halted | `restart_vm` | [Start that VM through the KubeVirt API](playbooks/restore-vm.yml) |
 
-## Repository layout
+Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/restart-aiops.yml) targets one named VM; not every anomaly has an approved recovery action.
 
-| Directory | Contents |
+## Run it on OpenShift
+
+1. **Prepare the cluster and VMs.** Follow the [cluster setup guide](0_cluster_setup/README.md#3-recreate-credentials-and-deploy-the-demo) to create `my-vm-project`, provision the `linux-mcp-ssh` Secret, and deploy a private copy of `1_vm_services/vm-deploy.yaml` with the matching SSH public key and VM console password. This creates `rhel10-service-1` through `rhel10-service-4` and `linux-mcp`.
+2. **Configure integrations.** For model-assisted detection and investigation, configure the optional [`llm-config` Secret](3_langgraph_workflow/README.md#integrating-an-llm). For real recovery, configure the [AAP event stream, controller templates, rulebook activation, and `eda-config` Secret](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible).
+3. **Deploy the workflow and traffic generator** from the repo root:
+
+   ```sh
+   oc apply -f 3_langgraph_workflow/workflow-pod.yaml
+   oc apply -k 5_load_generator
+   oc rollout status -n my-vm-project deployment/aiops-load-generator
+   ```
+
+   The generator runs in its own pod. It calls each guest through an internal `rhel10-service-N-http` Service on port 5000 and sends its results to `http://aiops-workflow:4318`.
+
+4. **Open the dashboard.** Print the URL and open it in a browser:
+
+   ```sh
+   echo "https://$(oc -n my-vm-project get route aiops-workflow -o jsonpath='{.spec.host}')"
+   ```
+
+   Each VM card refreshes every five seconds. Watch the CPU, memory, and concurrent-request dials, the recent guest messages, and the anomaly, RCA, and remediation rows. **Latest anomaly detector LLM output** shows the JSON verdict, UTC timestamp, and whether it came from detection or post-action verification. A healthy `{"detected":false}` verdict is distinct from an unavailable model. The dashboard data is also available at `/api/dashboard`.
+
+5. **Exercise a failure.** Once the VM is reporting telemetry, try a targeted scenario:
+
+   ```sh
+   python3 4_chaos_injector/chaos_injector.py --scenario kill-service --vm rhel10-service-1
+   ```
+
+   See the [chaos guide](4_chaos_injector/README.md) for SSH prerequisites and all eight scenarios, including network outages, blocked or altered telemetry, and host stress. To stop the repeating traffic and remove its HTTP Services, run `oc delete -k 5_load_generator`.
+
+## Repository guide
+
+| Directory | Purpose |
 | --- | --- |
-| `0_cluster_setup/` | live reference inventory, portable platform manifests and new-cluster runbook |
-| `1_vm_services/` | demo service (`service.py`) and VM/linux-mcp deployment (`vm-deploy.yaml`) |
-| `2_aiops_heuristic/` | standalone legacy demo: telemetry silence → EDA restart event. Not used or deployed by the LangGraph workflow. |
-| `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
-| `4_chaos_injector/` | chaos scenarios injected into the VMs to exercise the workflow |
-| [`5_load_generator/`](5_load_generator/README.md) | separate load-generator pod; `oc apply -k 5_load_generator` to start the repeating HTTP ramp |
-| `rulebooks/`, `playbooks/` | EDA event routing, controller recovery jobs and scoped VM-start permissions |
+| [`0_cluster_setup/`](0_cluster_setup/README.md) | Reference cluster inventory and rebuild instructions |
+| [`1_vm_services/`](1_vm_services/) | Flask workload, VM provisioning, and Linux MCP deployment |
+| [`2_aiops_heuristic/`](2_aiops_heuristic/) | Standalone predecessor; not required by the live demo |
+| [`3_langgraph_workflow/`](3_langgraph_workflow/README.md) | OTLP collector, agents, dashboard, and optional MLflow agent tracing |
+| [`4_chaos_injector/`](4_chaos_injector/README.md) | Fault injection CLI |
+| [`5_load_generator/`](5_load_generator/README.md) | Standalone generator pod, local CLI, ramp schedule, and response telemetry examples |
+| [`rulebooks/`](rulebooks/) and [`playbooks/`](playbooks/) | EDA event routing, controller recovery jobs, and scoped VM-start permissions |
