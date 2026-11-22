@@ -6,7 +6,8 @@ GET /health  whether this process is serving requests
 Metrics, logs and traces are pushed over OTLP/HTTP to
 OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
 OTEL_METRIC_EXPORT_INTERVAL ms. Host CPU and memory load are
-service.cpu.load and service.memory.load.
+service.cpu.load and service.memory.load. service.requests.active counts
+HTTP requests currently being handled by this process at collection time.
 
 The service runs cleanly: failures are injected externally with
 4_chaos_injector/chaos_injector.py (kill-service, stop-network, ...) and
@@ -83,6 +84,25 @@ health_checks = _meter.create_counter(
     "health.checks",
     description="Times the health endpoint was called",
 )
+active_requests = _meter.create_up_down_counter(
+    "service.requests.active",
+    unit="{request}",
+    description="Number of HTTP requests currently being handled",
+)
+active_requests.add(0)  # Report idle even before the first request.
+
+
+@app.before_request
+def count_request_start():
+    active_requests.add(1)
+    request.environ["aiops.request_counted"] = True
+
+
+@app.teardown_request
+def count_request_end(_error):
+    # Teardown also runs for failed requests; decrement only once per request.
+    if request.environ.pop("aiops.request_counted", False):
+        active_requests.add(-1)
 
 
 def _observe_uptime(_options):

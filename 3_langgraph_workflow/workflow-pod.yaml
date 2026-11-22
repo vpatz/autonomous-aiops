@@ -3390,6 +3390,7 @@ data:
                     "restarts": sum(1 for item in events if item.get("metric") == "service.uptime"),
                     "cpu": metrics.get("service.cpu.load"),
                     "memory": metrics.get("service.memory.load"),
+                    "active_requests": metrics.get("service.requests.active"),
                     "fault": metrics.get("dummy-crash", 0),
                 },
                 "run": run_view,
@@ -3463,7 +3464,7 @@ data:
         .pill.muted { background: rgba(142,160,181,.14); color: var(--muted); }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: pulse 2.2s ease-in-out infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-        .dials { display: flex; gap: 1.2rem; align-items: flex-end; margin: .8rem 0 .2rem; }
+        .dials { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: flex-end; margin: .8rem 0 .2rem; }
         .dial { text-align: center; }
         .dial svg { overflow: visible; }
         .needle { transition: transform 1s cubic-bezier(.35,0,.25,1); }
@@ -3543,7 +3544,7 @@ data:
         function arcPath() {
           return 'M ' + (CX - R) + ' ' + CY + ' A ' + R + ' ' + R + ' 0 0 1 ' + (CX + R) + ' ' + CY;
         }
-        function makeDial(title) {
+        function makeDial(title, maximum = 100) {
           const NS = 'http://www.w3.org/2000/svg';
           const wrap = el('div', 'dial');
           const svg = document.createElementNS(NS, 'svg');
@@ -3592,14 +3593,15 @@ data:
             set: function (v, unit, muted) {
               // When telemetry is not flowing the gauge is grayed out at zero
               // instead of showing stale values.
-              const clamped = muted ? 0 : (v == null ? 0 : Math.max(0, Math.min(100, v)));
-              needle.style.transform = 'rotate(' + (clamped / 100 * 180 - 90).toFixed(1) + 'deg)';
+              const fraction = muted ? 0 : Math.max(0, Math.min(1, (v || 0) / maximum));
+              needle.style.transform = 'rotate(' + (fraction * 180 - 90).toFixed(1) + 'deg)';
               arc.setAttribute('stroke-dasharray', muted ? '0 ' + ARC_LEN.toFixed(1)
-                : ((clamped / 100) * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
-              arc.setAttribute('stroke', muted ? 'var(--edge)' : colorFor(v, 60, 85));
+                : (fraction * ARC_LEN).toFixed(1) + ' ' + ARC_LEN.toFixed(1));
+              arc.setAttribute('stroke', muted ? 'var(--edge)' : (unit === '%' ? colorFor(v, 60, 85) : 'var(--ok)'));
               wrap.style.opacity = muted ? '0.45' : '1';
               wrap.classList.toggle('offline', muted);
-              value.textContent = muted ? '0.0' + unit : (v == null ? '-' : v.toFixed(1) + unit);
+              value.textContent = unit === '%' ? (muted ? '0.0%' : v.toFixed(1) + '%')
+                                               : (muted ? '—' : String(Math.round(v)));
             },
           };
         }
@@ -3645,7 +3647,10 @@ data:
           const dials = el('div', 'dials');
           const cpu = makeDial('host cpu');
           const mem = makeDial('host memory');
+          const requests = makeDial('concurrent requests', 32);
+          requests.node.title = 'In-flight HTTP requests at last collection. Dial scale: 0–32; number shows the full count.';
           dials.appendChild(cpu.node); dials.appendChild(mem.node);
+          dials.appendChild(requests.node);
           const side = el('div', 'side-stats');
           const uptime = sideStat(side, 'process uptime');
           const restarts = sideStat(side, 'restarts 10m');
@@ -3684,7 +3689,7 @@ data:
           root.appendChild(msgWrap);
 
           cardsRoot.appendChild(root);
-          return { root: root, status: status, cpu: cpu, mem: mem, uptime: uptime,
+          return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
                    restarts: restarts, signals: signals, fault: fault,
                    anomalyPill: anomalyPill, anomalyText: anomalyText,
                    rcaText: rcaText, rcaFill: rcaFill,
@@ -3716,6 +3721,7 @@ data:
           const muted = vm.status !== 'flowing';
           refs.cpu.set(service.cpu, '%', muted || service.cpu == null);
           refs.mem.set(service.memory, '%', muted || service.memory == null);
+          refs.requests.set(service.active_requests, '', muted || service.active_requests == null);
           refs.uptime.textContent = fmtDuration(service.uptime);
           refs.restarts.textContent = String(service.restarts);
           refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
@@ -3791,6 +3797,7 @@ data:
             setPill(refs.status, 'bad', 'no telemetry', false);
             refs.cpu.set(0, '%', true);
             refs.mem.set(0, '%', true);
+            refs.requests.set(null, '', true);
             refs.msgBox.value = 'no messages in the last 30s';
           });
           // All agents' output for every VM, newest last, in one textbox.
@@ -3947,7 +3954,7 @@ data:
         store.record_metrics(collector.parse_metrics(
             collector.sample_metrics_payload(
                 "vm-1", {"service.uptime": 42.0, "service.cpu.load": 3.0,
-                         "service.memory.load": 12.0, "dummy-crash": 1}),
+                         "service.memory.load": 12.0, "service.requests.active": 7, "dummy-crash": 1}),
             received_at=now - 2))
         run = state.initial_state("vm-1", telemetry={})
         run.update({
@@ -3970,7 +3977,8 @@ data:
         service = by_name["vm-1"]
         if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
             raise SystemExit(f"{STEP}: dashboard data vm view wrong: {service['vm']}")
-        if service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0:
+        if (service["vm"]["metrics"] < 5 or service["service"]["cpu"] != 3.0
+                or service["service"]["active_requests"] != 7):
             raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
         if service["service"]["fault"] != 1:
             raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
