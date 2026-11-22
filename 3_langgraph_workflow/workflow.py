@@ -146,6 +146,7 @@ def build_deps(args, store=None):
         deliver=deliver,
         is_vm_halted=confirmed_halted if deliver else None,
         get_evidence=store.recent_evidence if store is not None else None,
+        on_model_result=WorkflowHandler.record_model_result,
     )
     return app, linux, ansible
 
@@ -235,13 +236,23 @@ class WorkflowHandler(collector.CollectorHandler):
 
     runs = {}  # service_name -> latest final state (or {"running": True})
     runs_lock = threading.Lock()
+    model_results = {}  # latest detector call per VM, including healthy polls
+
+    @classmethod
+    def record_model_result(cls, service, verifying, verdict):
+        with cls.runs_lock:
+            cls.model_results[service] = {
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "phase": "verification" if verifying else "detection",
+                "verdict": verdict,
+            }
 
     def do_GET(self):
         from urllib.parse import parse_qs, urlparse
 
         parsed_url = urlparse(self.path)
         if parsed_url.path == "/api/dashboard":
-            payload = dashboard_data(self.store, self.runs, self.runs_lock)
+            payload = dashboard_data(self.store, self.runs, self.runs_lock, model_results=self.model_results)
             body = json.dumps(payload, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -270,12 +281,13 @@ class WorkflowHandler(collector.CollectorHandler):
         super().do_GET()
 
 
-def dashboard_data(store, runs, runs_lock, inventory=None):
+def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
     """Everything the dashboard renders, as JSON-safe data. Built only from
     telemetry windows and workflow run state — plus the VM inventory, which
     only decides which cards exist and whether a VM is down."""
     with runs_lock:
         runs_snapshot = dict(runs)
+        results_snapshot = dict(model_results or {})
     if inventory is None:
         inventory = vm_inventory()
 
@@ -313,6 +325,7 @@ def dashboard_data(store, runs, runs_lock, inventory=None):
             }
         services.append({
             "name": name,
+            "detector_llm": results_snapshot.get(name),
             "vm": {
                 "status": vm_status,
                 "last_seen_seconds_ago": last_seen,
@@ -602,6 +615,15 @@ def render_dashboard_shell():
       const anomalyPill = pill('muted', 'no run yet');
       const anomalyText = el('span', 'text', '');
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
+      const modelWrap = el('div', 'kv');
+      const modelLabel = el('div', 'label', 'Latest anomaly detector LLM output');
+      const modelBox = document.createElement('textarea');
+      modelBox.className = 'messages';
+      modelBox.readOnly = true;
+      modelBox.rows = 5;
+      modelBox.setAttribute('aria-label', 'Latest anomaly detector LLM output for ' + svc.name);
+      modelWrap.appendChild(modelLabel); modelWrap.appendChild(modelBox);
+      root.appendChild(modelWrap);
 
       const rcaRow = row(root, 'rca');
       const rcaWrap = el('div', 'text');
@@ -631,7 +653,7 @@ def render_dashboard_shell():
                anomalyPill: anomalyPill, anomalyText: anomalyText,
                rcaText: rcaText, rcaFill: rcaFill,
                remText: remText, remFill: remFill, edaChip: edaChip,
-               msgBox: msgBox };
+               msgBox: msgBox, modelBox: modelBox, modelLabel: modelLabel };
     }
 
     function setPill(node, cls, text, withDot) {
@@ -640,8 +662,13 @@ def render_dashboard_shell():
       if (withDot) { node.prepend(el('span', 'dot')); }
     }
 
-    function updateCard(svc, refs) {
+    function updateCard(svc, refs, llmEnabled) {
       const vm = svc.vm, service = svc.service;
+      const call = svc.detector_llm;
+      refs.modelLabel.textContent = 'Latest anomaly detector LLM output' +
+        (call ? ' · ' + call.phase + ' · ' + call.at : '');
+      refs.modelBox.value = call ? (call.verdict === null ? 'No valid model response; used rules.'
+        : JSON.stringify(call.verdict, null, 2)) : (llmEnabled ? 'Awaiting first response.' : 'LLM not configured.');
       // VM status is color-coded on the card itself; cards are never
       // removed for a down VM, so the last known state stays visible.
       refs.root.className = 'card vm-' + vm.status;
@@ -725,7 +752,7 @@ def render_dashboard_shell():
       data.services.forEach(function (svc) {
         let refs = cards.get(svc.name);
         if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
-        updateCard(svc, refs);
+        updateCard(svc, refs, data.meta.llm);
       });
       const reported = new Set(data.services.map(svc => svc.name));
       cards.forEach(function (refs, name) {
@@ -783,7 +810,8 @@ def serve_forever(args):
         try:
             telemetry = store.window(service_name, args.window_seconds)
             anomaly = anomaly_detector.detect_window(service_name, telemetry, args.silence_seconds,
-                                                      get_evidence=store.recent_evidence)
+                                                      get_evidence=store.recent_evidence,
+                                                      on_model_result=WorkflowHandler.record_model_result)
             if not anomaly["detected"]:
                 return
             incident = True
@@ -853,7 +881,8 @@ def run_once(args):
                     continue
                 window = store.window(service_name, args.window_seconds)
                 quick = anomaly_detector.detect_window(service_name, window, args.silence_seconds,
-                                                       get_evidence=store.recent_evidence)
+                                                       get_evidence=store.recent_evidence,
+                                                       on_model_result=WorkflowHandler.record_model_result)
                 if quick["detected"]:
                     target = service_name
                     print(f"{STEP}: anomaly detected for {service_name}: {quick['summary']}", flush=True)
@@ -908,7 +937,13 @@ def self_check():
     with patch.object(llm, "available", return_value=True), patch.object(
             llm, "chat_json", return_value={"detected": False}) as chat:
         anomaly_detector.detect_window("vm-1", history.window("vm-1", 120), 10,
-                                       get_evidence=history.recent_evidence)
+                                       get_evidence=history.recent_evidence,
+                                       on_model_result=WorkflowHandler.record_model_result)
+        # Healthy polls have no workflow run but must still expose the model's own output.
+        preview = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+                                 model_results=WorkflowHandler.model_results)
+        card = next(c for c in preview["services"] if c["name"] == "vm-1")
+        assert card["run"] is None and card["detector_llm"]["verdict"] == {"detected": False}
         evidence = json.loads(chat.call_args.args[0][1]["content"])["evidence"]
         assert sum(k.startswith("metrics:") for k in evidence) == 2
         assert sum(k.startswith("logs:") for k in evidence) == 201

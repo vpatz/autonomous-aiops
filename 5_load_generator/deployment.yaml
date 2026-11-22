@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiops-load-generator
+spec:
+  replicas: 1
+  # Avoid doubling the load during a code/config update.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aiops-load-generator
+  template:
+    metadata:
+      labels:
+        app: aiops-load-generator
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: generator
+          image: registry.redhat.io/ubi9/python-312:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          workingDir: /opt/load-generator
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              python3 -m pip install --no-cache-dir --target /tmp/pydeps -r requirements.txt
+              export PYTHONPATH=/tmp/pydeps
+              exec python3 load_generator.py \
+                --vm rhel10-service-1,rhel10-service-2,rhel10-service-3,rhel10-service-4 \
+                --url-template 'http://{vm}-http:5000{path}'
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://aiops-workflow:4318
+          volumeMounts:
+            - name: code
+              mountPath: /opt/load-generator
+              readOnly: true
+      volumes:
+        - name: code
+          configMap:
+            name: aiops-load-generator-code

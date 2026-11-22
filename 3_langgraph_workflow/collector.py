@@ -114,6 +114,14 @@ def parse_logs(payload, content_encoding=None, received_at=None, retain=None):
     parsed = []
     for resource_logs in request.resource_logs:
         service_name = _resource_name(resource_logs.resource)
+        # Client observations belong in the target's investigation evidence,
+        # but must never create a VM or refresh its guest telemetry heartbeat.
+        if service_name == "aiops-load-generator":
+            target = next((attr.value.string_value for attr in resource_logs.resource.attributes
+                           if attr.key == "target.vm"), "")
+            if target and retain is not None:
+                retain(target, "client_logs", resource_logs, received_at)
+            continue
         if retain is not None:
             retain(service_name, "logs", resource_logs, received_at)
         entries = []

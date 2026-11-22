@@ -194,7 +194,12 @@ What changes with the LLM on:
   the built-in rules, even when no rule fires. Each live detector prompt includes
   every OTLP metric, log and trace resource received from that VM in the last
   30 seconds, in receipt order, with timestamps, attributes and all data points
-  preserved in protobuf JSON. Recovery checks further restrict this to exports
+  preserved in protobuf JSON. `client_logs:*` entries in the same evidence map
+  are observations **about** that VM from `aiops-load-generator`: each log body
+  contains one second of HTTP status counts or `no_response` outcomes. The
+  detector can cite these alongside guest signals or flag a client-visible
+  failure on its own. Client observations never refresh guest liveness.
+  Recovery checks further restrict this to exports
   received after the action. There is no record cap or prompt truncation: if
   the window exceeds the model's context limit, detection falls back to rules.
   The rule engine still uses its configured workflow window. A positive
@@ -215,6 +220,10 @@ What changes with the LLM on:
 The dashboard header and `--self-check` output show whether the LLM is
 configured, and the findings trail names the tool the model chose at each
 iteration.
+
+Each VM card shows the latest anomaly detector LLM verdict as JSON, labeled
+with its UTC timestamp and whether it came from detection or verification.
+Healthy polls update this output even when no investigation starts.
 
 The dashboard at `/` is a card-based view built **only from telemetry and
 workflow state** for its content. Cards flow two per row and are never

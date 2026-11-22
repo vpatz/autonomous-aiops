@@ -116,4 +116,5 @@ activation and MLflow before the application deployment below.
 | `2_aiops_heuristic/` | standalone legacy demo: telemetry silence → EDA restart event. Not used or deployed by the LangGraph workflow. |
 | `3_langgraph_workflow/` | the multi-agent LangGraph workflow (this demo) |
 | `4_chaos_injector/` | chaos scenarios injected into the VMs to exercise the workflow |
+| [`5_load_generator/`](5_load_generator/README.md) | separate load-generator pod; `oc apply -k 5_load_generator` to start the repeating HTTP ramp |
 | `rulebooks/`, `playbooks/` | EDA event routing, controller recovery jobs and scoped VM-start permissions |

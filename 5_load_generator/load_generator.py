@@ -47,6 +47,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 STEP = "load generator"
@@ -184,9 +185,7 @@ def do_request(vm, path, cfg):
     """Dispatch one request via the configured transport."""
     if cfg.url_template or cfg.urls:
         if cfg.urls:
-            base = cfg.rng.choice(cfg.urls) if len(cfg.urls) > 1 else cfg.urls[0]
-            # base may already contain a path; append only if needed
-            url = base.rstrip("/") + path if not cfg.url_template else build_url(vm, path, cfg.url_template)
+            url = cfg.url_by_vm[vm].rstrip("/") + path
         else:
             url = build_url(vm, path, cfg.url_template)
         status, detail = http_get(url, cfg.timeout)
@@ -224,7 +223,16 @@ def slots(cfg):
 
 def run_load(cfg):
     rng = cfg.rng
-    targets = resolve_targets(cfg, rng)
+    if cfg.urls:
+        targets = cfg.vms or [urlsplit(url).netloc for url in cfg.urls]
+        if len(targets) != len(cfg.urls) or len(set(targets)) != len(targets):
+            raise LoadError("supply one distinct --vm name per --url, in matching order")
+        if any(not urlsplit(url).hostname or urlsplit(url).username is not None
+               or urlsplit(url).scheme not in ("http", "https") for url in cfg.urls):
+            raise LoadError("--url requires an http(s) base URL without credentials")
+        cfg.url_by_vm = dict(zip(targets, cfg.urls))
+    else:
+        targets = resolve_targets(cfg, rng)
     if not targets:
         raise LoadError("no target VMs (pass --vm, set DASHBOARD_VMS, or run in a namespace with VMIs)")
     print(f"[{STEP}] targets: {', '.join(targets)}", flush=True)
@@ -241,8 +249,7 @@ def run_load(cfg):
             path = pick_endpoint(rng)
             if cfg.url_template or cfg.urls:
                 if cfg.urls:
-                    base = rng.choice(cfg.urls) if len(cfg.urls) > 1 else cfg.urls[0]
-                    url = base.rstrip("/") + path if not cfg.url_template else build_url(vm, path, cfg.url_template)
+                    url = cfg.url_by_vm[vm].rstrip("/") + path
                 else:
                     url = build_url(vm, path, cfg.url_template)
                 print(f"[{STEP}] (dry-run) {i}: GET {url} vm={vm} via=http", flush=True)
@@ -254,13 +261,30 @@ def run_load(cfg):
             print(f"[{STEP}] (dry-run) repeat this {len(RAMP_CYCLE)}s cycle until interrupted")
         return {"ok": 0, "fail": 0, "total": count}
 
+    from response_telemetry import ResponseTelemetry
+    collector_url = cfg.collector_url
+    if not collector_url:
+        if cfg.urls:
+            collector_url = "http://localhost:4318"
+        else:
+            code, host = run_argv(["oc", "get", "route", "aiops-workflow", "-n", cfg.namespace,
+                                   "-o", "jsonpath={.spec.host}"])
+            if code or not host:
+                raise LoadError("cannot discover the workflow route; pass --collector-url BASE_URL")
+            collector_url = "https://" + host
+    telemetry = ResponseTelemetry(collector_url, targets)
     ok = fail = skipped = 0
 
     def one_request(n):
         vm = rng.choice(targets)
         path = pick_endpoint(rng)
-        result = do_request(vm, path, cfg)
+        try:
+            result = do_request(vm, path, cfg)
+        except Exception:
+            telemetry.record(vm, None)
+            raise
         code = result["status"]
+        telemetry.record(vm, code)
         success = isinstance(code, int) and 200 <= code < 400
         tag = "ok" if success else "fail"
         print(f"[{STEP}] {n:4d} vm={result['vm']:20s} {result['path']:8s} -> {code} ({tag}) via={result['via']}", flush=True)
@@ -277,7 +301,7 @@ def run_load(cfg):
         ok += int(success)
         fail += int(not success)
 
-    with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+    with telemetry, ThreadPoolExecutor(max_workers=cfg.workers) as pool:
         pending = set()
         for n, (offset, rate) in enumerate(slots(cfg), 1):
             if cfg.rate is not None and len(pending) >= cfg.workers:
@@ -311,6 +335,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="print plan only, no cluster calls")
     parser.add_argument("--vm", action="append", default=[], help="target VM (comma-separated; repeatable)")
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE, help="KubeVirt namespace")
+    parser.add_argument("--collector-url", default=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+                        help="OTLP/HTTP collector base URL for five-second response batches")
     parser.add_argument("--url", action="append", default=[], dest="urls", help="direct HTTP base URL (repeatable; e.g. http://localhost:5000). When set, transport is http.")
     parser.add_argument("--url-template", default="", help="URL template with {vm} and {path} placeholders, e.g. http://{vm}.my-vm-project.svc.cluster.local:5000{path}")
     parser.add_argument("--ssh-user", default=DEFAULT_SSH_USER, help="SSH user for oc virt ssh")
@@ -332,6 +358,8 @@ def main():
     args.vms = [name for group in args.vm for name in group.split(",") if name.strip()]
     # --url may be passed as comma-separated in one flag
     args.urls = [u for group in args.urls for u in group.split(",") if u.strip()]
+    if args.urls and args.url_template:
+        parser.error("use either --url or --url-template")
     if args.requests is None and args.duration is None and args.rate is not None:
         args.requests = 20
     if args.requests is not None and args.requests < 1:
@@ -444,6 +472,7 @@ def self_check():
 
     # direct-url dry-run
     class DryHttpCfg(DryCfg):
+        vms = ["rhel10-service-1"]
         urls = ["http://localhost:5000"]
         url_template = ""
     result = run_load(DryHttpCfg())

@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: my-vm-project
+resources:
+  - deployment.yaml
+  - vm-http-services.yaml
+configMapGenerator:
+  - name: aiops-load-generator-code
+    files:
+      - load_generator.py
+      - response_telemetry.py
+      - requirements.txt
