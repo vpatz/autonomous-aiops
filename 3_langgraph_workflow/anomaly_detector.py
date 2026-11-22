@@ -112,7 +112,7 @@ def analyze_window(window, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
 
 
 def detect_window(service_name, window, silence_seconds, use_llm=True, verifying=False,
-                  get_evidence=None, since=0, on_model_result=None):
+                  get_evidence=None, since=0, on_model_result=None, evidence_snapshot=None):
     """Classify once per snapshot, retaining rule signals even if the model disagrees."""
     anomaly = analyze_window(window, silence_seconds)
     if not use_llm or not window.get("ever_seen") or not llm.available():
@@ -145,6 +145,8 @@ def detect_window(service_name, window, silence_seconds, use_llm=True, verifying
                 for i, record in enumerate(window.get(key, [])):
                     if record.get("age_seconds", 0) <= 30:
                         evidence[f"{key}:{i}"] = record
+        if evidence_snapshot is not None:
+            evidence_snapshot.update(evidence)
         reply = llm.chat_json([
             {"role": "system", "content": instruction},
             {"role": "user", "content": json.dumps({
@@ -190,9 +192,15 @@ def build_node(silence_seconds=state.DEFAULT_SILENCE_SECONDS, use_llm=True, get_
         attempts = workflow_state.get("attempts", 0)
         # The live poller passes the verdict for this exact initial snapshot.
         # Verification always classifies the fresh post-remediation window.
-        anomaly = (workflow_state.get("anomaly") if not attempts else None) or detect_window(
-            service_name, workflow_state.get("telemetry", {}), silence_seconds, use_llm,
-            bool(attempts), get_evidence, workflow_state.get("verify_since", 0), on_model_result)
+        anomaly = workflow_state.get("anomaly") if not attempts else None
+        if anomaly:
+            snapshot = workflow_state.get("detector_evidence", {})
+        else:
+            snapshot = {}
+            anomaly = detect_window(
+                service_name, workflow_state.get("telemetry", {}), silence_seconds, use_llm,
+                bool(attempts), get_evidence, workflow_state.get("verify_since", 0),
+                on_model_result, evidence_snapshot=snapshot)
         max_attempts = workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS)
         finding = (
             f"[{STEP}] service={service_name} anomaly={anomaly['detected']} "
@@ -214,7 +222,8 @@ def build_node(silence_seconds=state.DEFAULT_SILENCE_SECONDS, use_llm=True, get_
                 "findings": [finding + " -> giving up: max remediation attempts reached"],
             }
             return Command(goto="__end__", update=update)
-        update = {"anomaly": anomaly, "status": state.STATUS_INVESTIGATING, "findings": [finding]}
+        update = {"anomaly": anomaly, "detector_evidence": snapshot,
+                  "status": state.STATUS_INVESTIGATING, "findings": [finding]}
         return Command(goto=state.NODE_RCA, update=update)
 
     return detector_node

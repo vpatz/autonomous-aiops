@@ -119,7 +119,7 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   `dummy-crash` counter increment as a fault signal for services that report one.
 - Stage 3 verification semantics: a service is "down" when its latest metrics are older
   than `--silence-seconds` (default 10s; services never seen are never restarted); the
-  RCA inner loop is bounded by `--max-iterations` (5), the remediation outer loop by
+  RCA inner loop is bounded by `--max-iterations` (25), the remediation outer loop by
   `--max-attempts` (3). Post-remediation windows are filtered by `since` so only
   telemetry received after the fix counts.
 - Local end-to-end test of the full chain (real service.py telemetry + mock MCP servers

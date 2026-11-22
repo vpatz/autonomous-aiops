@@ -4,6 +4,8 @@ Four RHEL VMs on OpenShift Virtualization run a Flask service. A separate load-g
 
 ## Try it offline
 
+For a presenter walkthrough with concurrent faults, MLflow traces, and recovery verification, see the [demo sequence](demo.md).
+
 From the repository root, run:
 
 ```sh

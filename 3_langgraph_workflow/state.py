@@ -36,7 +36,7 @@ STATUS_FAILED = "failed"
 
 DEFAULT_WINDOW_SECONDS = 120
 DEFAULT_SILENCE_SECONDS = 10
-DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_MAX_ITERATIONS = 25
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_POLL_SECONDS = 5
 DEFAULT_COOLDOWN_SECONDS = 120
@@ -50,6 +50,7 @@ class WorkflowState(TypedDict, total=False):
     window_seconds: int
     telemetry: dict
     anomaly: dict
+    detector_evidence: dict  # transient snapshot for the RCA inner loop
     investigation: Annotated[list, operator.add]
     root_cause: dict
     vm_halted: bool

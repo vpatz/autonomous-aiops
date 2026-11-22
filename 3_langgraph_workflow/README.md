@@ -205,7 +205,11 @@ What changes with the LLM on:
   The rule engine still uses its configured workflow window. A positive
   verdict must cite evidence keys from that window. The `llm-anomaly`
   signal and explanation are recorded and routed to RCA.
-- **root cause analyzer (inner loop)** — each iteration asks the model for
+- **root cause analyzer (inner loop)** — RCA receives the detector's exact
+  per-VM evidence snapshot, including guest OTLP and load-generator outcomes.
+  Evidence keys remain stable even if the collector's rolling window advances
+  while RCA checks the guest. After remediation, a new investigation uses the
+  new verification snapshot. Each iteration asks the model for
   the next action as a JSON decision (`call_tool` with arguments, or
   `conclude` with a root cause) over the *live* MCP `tools/list` catalog,
   together with the investigation history. Against the real linux-mcp
@@ -265,7 +269,7 @@ Environment variables (all optional; heuristics apply without an LLM):
 | `WINDOW_SECONDS` | telemetry window analyzed per run (see also `--window-seconds`) |
 
 CLI flags mirror the tunables: `--window-seconds`, `--silence-seconds`,
-`--max-iterations` (inner-loop budget), `--max-attempts` (outer-loop
+`--max-iterations` (inner-loop budget, default 25 tool calls), `--max-attempts` (outer-loop
 budget), `--cooldown-seconds`, `--verify-wait-seconds`.
 
 ## Agents and safety

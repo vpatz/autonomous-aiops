@@ -219,7 +219,6 @@ def run_offline_demo():
     final = graph.run(app, state.initial_state(
         service_name,
         telemetry=get_window(service_name, 120),
-        max_iterations=5,
         max_attempts=3,
     ), label=service_name)
     print(f"{STEP}: final status: {final.get('status')}", flush=True)
@@ -809,9 +808,11 @@ def serve_forever(args):
         incident = False
         try:
             telemetry = store.window(service_name, args.window_seconds)
+            snapshot = {}
             anomaly = anomaly_detector.detect_window(service_name, telemetry, args.silence_seconds,
                                                       get_evidence=store.recent_evidence,
-                                                      on_model_result=WorkflowHandler.record_model_result)
+                                                      on_model_result=WorkflowHandler.record_model_result,
+                                                      evidence_snapshot=snapshot)
             if not anomaly["detected"]:
                 return
             incident = True
@@ -826,6 +827,7 @@ def serve_forever(args):
                 max_attempts=args.max_attempts,
             )
             workflow_state["anomaly"] = anomaly
+            workflow_state["detector_evidence"] = snapshot
             final = graph.run(app, workflow_state, label=service_name)
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
@@ -880,9 +882,11 @@ def run_once(args):
                 if not store.window(service_name, 1)["ever_seen"]:
                     continue
                 window = store.window(service_name, args.window_seconds)
+                snapshot = {}
                 quick = anomaly_detector.detect_window(service_name, window, args.silence_seconds,
                                                        get_evidence=store.recent_evidence,
-                                                       on_model_result=WorkflowHandler.record_model_result)
+                                                       on_model_result=WorkflowHandler.record_model_result,
+                                                       evidence_snapshot=snapshot)
                 if quick["detected"]:
                     target = service_name
                     print(f"{STEP}: anomaly detected for {service_name}: {quick['summary']}", flush=True)
@@ -905,6 +909,7 @@ def run_once(args):
                 max_attempts=args.max_attempts,
             )
             initial["anomaly"] = quick
+            initial["detector_evidence"] = snapshot
             final = graph.run(app, initial, label=target)
             print(f"{STEP}: final status: {(final or {}).get('status')}", flush=True)
             return final
