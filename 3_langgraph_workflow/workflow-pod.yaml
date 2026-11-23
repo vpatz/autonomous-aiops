@@ -25,6 +25,7 @@ data:
 
     import operator
     import time
+    from datetime import datetime, timedelta, timezone
     from typing import Annotated, TypedDict
 
     STEP = "workflow state"
@@ -41,6 +42,7 @@ data:
     STATUS_REMEDIATING = "remediating"
     STATUS_REMEDIATED = "remediated"
     STATUS_FAILED = "failed"
+    STATUS_NO_ACTION = "no_remediation_needed"
 
     DEFAULT_WINDOW_SECONDS = 120
     LLM_EVIDENCE_SECONDS = 10
@@ -54,6 +56,15 @@ data:
 
     def utc_timestamp():
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+    IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+    def ist_timestamp(when=None):
+        """Human-facing log time; stored OTLP and API instants remain UTC."""
+        when = datetime.fromisoformat(when.replace("Z", "+00:00")) if when else datetime.now(IST)
+        return when.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
 
     class WorkflowState(TypedDict, total=False):
@@ -75,6 +86,7 @@ data:
         iteration: int
         max_iterations: int
         verify_since: float
+        incident_since: float
         status: str
 
 
@@ -259,6 +271,7 @@ data:
     import time
     import urllib.error
     import urllib.request
+    from state import ist_timestamp
 
     STEP = "llm client"
     DEFAULT_MODEL = "rits/meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
@@ -334,7 +347,7 @@ data:
         request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
         if service_name is not None:
             _pacer.wait(service_name)
-            print(f"[llm client] {service_name} model call starting", flush=True)
+            print(f"[{ist_timestamp()}] [llm client] {service_name} model call starting", flush=True)
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 body = json.loads(response.read().decode("utf-8", "replace"))
@@ -1132,7 +1145,7 @@ data:
     import time
     from collections import deque
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from state import LLM_EVIDENCE_SECONDS
+    from state import LLM_EVIDENCE_SECONDS, ist_timestamp
 
     from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
         ExportLogsServiceRequest,
@@ -1359,7 +1372,8 @@ data:
             return self._services[service_name]
 
         def _message(self, entry, text, received_at):
-            entry["messages"].append({"text": text, "at": received_at})
+            entry["messages"].append({"text": text, "at": received_at,
+                                      "received_ms": round((time.time() - time.monotonic() + received_at) * 1000)})
 
         def record_metrics(self, parsed):
             with self._lock:
@@ -1409,7 +1423,8 @@ data:
                 if entry is None:
                     return []
                 return [
-                    {"age_seconds": round(now - item["at"], 1), "text": item["text"]}
+                    {"age_seconds": round(now - item["at"], 1), "received_ms": item["received_ms"],
+                     "text": item["text"]}
                     for item in entry["messages"]
                     if item["at"] >= cutoff
                 ]
@@ -1593,7 +1608,7 @@ data:
                     parsed if path == "/v1/logs" else (),
                     parsed if path == "/v1/traces" else (),
                 ):
-                    print(line, flush=True)
+                    print(f"[{ist_timestamp()}] {line}", flush=True)
             self._respond_proto(response)
 
         def do_GET(self):
@@ -1948,7 +1963,7 @@ data:
                 # Reasoning tokens share the output budget with the final JSON.
                 # Retry the identical evidence once, through the normal pacer.
                 retry_tokens = MODEL_OUTPUT_TOKENS * 2
-                print(f"[{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
+                print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
                 reply = llm.chat_json(messages, service_name=service_name, max_tokens=retry_tokens)
             summary = reply.get("summary") if isinstance(reply, dict) else None
             if not isinstance(summary, str) or not summary.strip():
@@ -1957,12 +1972,12 @@ data:
             return {**anomaly, "summary": report["summary"]}
         except Exception as exc:  # model unavailable or unusable response
             failure = str(exc) if isinstance(exc, llm.LlmError) else f"model check failed ({type(exc).__name__})"
-            print(f"[{STEP}] {service_name}: {failure}; using rules", flush=True)
+            print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {failure}; using rules", flush=True)
             return anomaly
         finally:
             if call_started is not None:
                 result = "fallback" if failure else "summarized"
-                print(f"[{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
+                print(f"[{state.ist_timestamp()}] [{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
                       f"prompt_bytes={prompt_bytes} elapsed_s={time.monotonic()-call_started:.2f} "
                       f"result={result}", flush=True)
             if on_model_result is not None:
@@ -2170,9 +2185,11 @@ data:
 
     import argparse
     import json
+    import time
 
     import llm
     import agent_tracing
+    import anomaly_detector
     import mcp_client
     import state
 
@@ -2236,7 +2253,10 @@ data:
             '{"action": "call_tool", "tool": "<name>", "arguments": {...}}\n'
             "or, once you know the root cause:\n"
             '{"action": "conclude", "root_cause": {"component": "...", "summary": "...", '
-            '"confidence": "high|medium|low"}}\n\n'
+            '"confidence": "high|medium|low"}}\n'
+            'If the incident appears transient and has cleared, you may instead return '
+            '{"action":"no_remediation_needed","reason":"why no action is indicated"}. '
+            'The workflow verifies this against fresh guest telemetry.\n\n'
             "Ground every argument in these facts (never invent names):\n"
             f"- The service runs on VM '{service_name}'. Any 'host' argument must be "
             f"exactly '{service_name}'.\n"
@@ -2293,7 +2313,29 @@ data:
         }
 
 
-    def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None):
+    def cleared_since_incident(workflow_state, get_window, silence_seconds):
+        """Require recent *guest* evidence after the trigger (and any intervening action)."""
+        since = max(workflow_state.get("incident_since", 0), workflow_state.get("verify_since", 0))
+        if not get_window or not since or time.monotonic() - since < silence_seconds:
+            return False
+        current = get_window(workflow_state["service_name"], silence_seconds, since=since)
+        metrics = current.get("metrics", {})
+        if not current.get("ever_seen") or current.get("last_seen_seconds_ago") is None:
+            return False
+        if not all(isinstance(metrics.get(k), (float, int))
+                for k in ("service.uptime", "service.cpu.load", "service.memory.load")):
+            return False
+        original = workflow_state.get("anomaly", {}).get("signals", [])
+        if not original or anomaly_detector.analyze_window(current, silence_seconds)["detected"]:
+            return False
+        if {"error-logs", "failed-spans"}.intersection(original):
+            return any(s.get("status_code") in (0, 1) and s.get("name", "").startswith("GET ")
+                       for s in current.get("traces", []))
+        return True
+
+
+    def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None,
+                   get_window=None, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
         """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
         @agent_tracing.agent(state.NODE_RCA)
@@ -2309,6 +2351,13 @@ data:
                 if on_progress:
                     on_progress(service_name, "rca", f"Iteration {iteration}: {message}")
 
+            def no_action(reason):
+                return Command(goto="__end__", update={
+                    "status": state.STATUS_NO_ACTION, "iteration": iteration, "detector_evidence": {},
+                    "root_cause": {"at": state.utc_timestamp(), "component": service_name,
+                                   "summary": reason, "confidence": "high", "found": False},
+                    "findings": [f"[{STEP}] No remediation needed: {reason}"]})
+
             progress("Checking host state and available diagnostics…")
             if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
                     and is_vm_halted(service_name)):
@@ -2317,7 +2366,11 @@ data:
                      "iteration": iteration, "vm_halted": True, "detector_evidence": {},
                      "root_cause": {"at": state.utc_timestamp(), "component": "VirtualMachine", "confidence": "high",
                                    "summary": summary, "found": True},
-                    "findings": [f"[{STEP}] {summary}"]})
+                     "findings": [f"[{STEP}] {summary}"]})
+
+            cleared = "Fresh guest telemetry no longer triggers the incident rules."
+            if cleared_since_incident(workflow_state, get_window, silence_seconds):
+                return no_action(cleared)
 
             tools = []
             if linux_mcp is not None:
@@ -2339,6 +2392,12 @@ data:
                     )
                 except Exception:  # noqa: BLE001 - LLM is best effort
                     decision = None
+            if decision and decision.get("action") == "no_remediation_needed":
+                if cleared_since_incident(workflow_state, get_window, silence_seconds):
+                    reason = decision.get("reason")
+                    return no_action(f"{cleared} {truncate(reason, 240)}"
+                                     if isinstance(reason, str) and reason.strip() else cleared)
+                decision = None  # No model-only dismissal of an unresolved incident.
             if decision is None:
                 if linux_mcp is None:
                     # No MCP server configured: conclude from telemetry alone.
@@ -2446,6 +2505,23 @@ data:
         workflow_state = state.initial_state("vm-1")
         workflow_state["anomaly"] = {"detected": True, "signals": ["error-logs"], "summary": "error logs"}
         from langgraph.types import Command
+
+        # A transient spike clearing is a legitimate conclusion, not a successful
+        # repair or a reason to send any event. Silence and missing gauges can't clear it.
+        incident = {**state.initial_state("vm-1"), "incident_since": time.monotonic() - 30,
+                    "anomaly": {"detected": True, "signals": ["cpu-saturation"]}}
+        fresh = {"ever_seen": True, "last_seen_seconds_ago": 1, "metrics": {
+            "service.uptime": 500, "service.cpu.load": 10, "service.memory.load": 40}}
+        def get_fresh(vm, seconds, since):
+            assert vm == "vm-1" and since == incident["incident_since"]
+            return fresh
+        snapshot = build_node(use_llm=False, get_window=get_fresh)(incident)
+        assert snapshot.goto == "__end__" and snapshot.update["status"] == state.STATUS_NO_ACTION
+        assert "remediation" not in snapshot.update
+        fresh["metrics"]["service.cpu.load"] = 95
+        assert not cleared_since_incident(incident, get_fresh, 10)
+        fresh["metrics"].clear()
+        assert not cleared_since_incident(incident, get_fresh, 10)
 
         iterations = 0
         while True:
@@ -3139,7 +3215,8 @@ data:
             silence_seconds=silence_seconds, use_llm=use_llm, get_evidence=get_evidence,
             on_model_result=on_model_result))
         graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-            linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress))
+            linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress,
+            get_window=get_window, silence_seconds=silence_seconds))
         graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
             ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None, on_progress=on_progress))
         graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
@@ -3172,7 +3249,7 @@ data:
                 findings = snapshot.get("findings") or []
                 if print_steps:
                     for line in findings[seen:]:
-                        print(f"  [{label}] {line}", flush=True)
+                        print(f"[{state.ist_timestamp()}] [{label}] {line}", flush=True)
                 seen = len(findings)
             if final:
                 output.update(status=final.get("status"), attempts=final.get("attempts"))
@@ -3543,7 +3620,7 @@ data:
         def progress(cls, service, panel, message):
             with cls.changed:
                 cls.runs[service] = {**cls.runs.get(service, {}), "pending": {
-                    panel: f"[{state.utc_timestamp()}] {message}"}}
+                    panel: f"[{state.ist_timestamp()}] {message}"}}
                 cls.revision += 1
                 cls.changed.notify_all()
 
@@ -3666,7 +3743,7 @@ data:
             for entry in history:
                 verdict = entry["verdict"]
                 source = "LLM" if verdict["source"] == "llm" else "rules"
-                text = f"[{entry['at']}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
+                text = f"[{state.ist_timestamp(entry['at'])}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
                 if entry["failure"]:
                     text += f" (model error: {entry['failure']})"
                 incident_lines.append(" ".join(text.split()))
@@ -3993,8 +4070,11 @@ data:
           return text.length > 180 ? text.slice(0, 179) + '…' : text;
         }
 
+        function istTime(at) {
+          return new Date(new Date(at).getTime() + 330 * 60000).toISOString().slice(0, 19).replace('T', ' ') + ' IST';
+        }
         function stamped(at, message) {
-          return at ? `[${at}] ${message}` : message;
+          return at ? `[${istTime(at)}] ${message}` : message;
         }
 
         function rcaMessage(run) {
@@ -4012,6 +4092,7 @@ data:
         }
 
         function remedyMessage(run) {
+          if (run?.status === 'no_remediation_needed') return stamped(run.updated_at, 'No remediation needed: ' + run.root_cause.summary);
           if (run?.pending?.remedy) return run.pending.remedy;
           const actions = (run?.plan || []).map(step => step.tool).join(', ');
           if (!actions) {
@@ -4056,7 +4137,7 @@ data:
 
           // Message feed: updated on every poll, regardless of run state.
           const lines = (svc.messages || []).map(function (m) {
-            return '[' + Math.round(m.age_seconds) + 's ago] ' + m.text;
+            return stamped(m.received_ms, m.text);
           });
           refs.msgBox.value = lines.length ? lines.join('\n')
                                            : 'no messages in the last 30s';
@@ -4090,7 +4171,7 @@ data:
           const anomalies = data.services.filter(s => s.run && s.run.anomaly && s.run.anomaly.detected).length;
           statsEl.textContent = data.services.length + ' VMs · ' + flowing + ' flowing · ' +
             anomalies + ' anomaly · llm ' + (data.meta.llm ? 'on' : 'off') +
-            ' · updated ' + new Date(data.meta.generated_at).toLocaleTimeString();
+            ' · updated ' + istTime(data.meta.generated_at);
           // Cards are created on first sight and never removed: a VM that goes
           // down keeps its card (color-coded red) with the last known state.
           data.services.forEach(function (svc) {
@@ -4155,6 +4236,7 @@ data:
 
         def run_for_service(service_name, telemetry, trigger):
             try:
+                incident_since = time.monotonic()
                 snapshot = {}
                 WorkflowHandler.publish_run(service_name, {"running": True})
                 anomaly = anomaly_detector.summarize_incident(
@@ -4170,6 +4252,7 @@ data:
                     max_attempts=args.max_attempts,
                 )
                 workflow_state["anomaly"] = anomaly
+                workflow_state["incident_since"] = incident_since
                 workflow_state["detector_evidence"] = snapshot
                 def publish_step(snapshot):
                     keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
@@ -4233,6 +4316,7 @@ data:
                     if not store.window(service_name, 1)["ever_seen"]:
                         continue
                     window = store.window(service_name, args.window_seconds)
+                    incident_since = time.monotonic()
                     snapshot = {}
                     quick = anomaly_detector.detect_window(service_name, window, args.silence_seconds,
                                                            get_evidence=store.recent_evidence,
@@ -4260,6 +4344,7 @@ data:
                     max_attempts=args.max_attempts,
                 )
                 initial["anomaly"] = quick
+                initial["incident_since"] = incident_since
                 initial["detector_evidence"] = snapshot
                 final = graph.run(app, initial, label=target)
                 print(f"{STEP}: final status: {(final or {}).get('status')}", flush=True)

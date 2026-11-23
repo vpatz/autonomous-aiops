@@ -28,7 +28,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from state import LLM_EVIDENCE_SECONDS
+from state import LLM_EVIDENCE_SECONDS, ist_timestamp
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
     ExportLogsServiceRequest,
@@ -255,7 +255,8 @@ class TelemetryStore:
         return self._services[service_name]
 
     def _message(self, entry, text, received_at):
-        entry["messages"].append({"text": text, "at": received_at})
+        entry["messages"].append({"text": text, "at": received_at,
+                                  "received_ms": round((time.time() - time.monotonic() + received_at) * 1000)})
 
     def record_metrics(self, parsed):
         with self._lock:
@@ -305,7 +306,8 @@ class TelemetryStore:
             if entry is None:
                 return []
             return [
-                {"age_seconds": round(now - item["at"], 1), "text": item["text"]}
+                {"age_seconds": round(now - item["at"], 1), "received_ms": item["received_ms"],
+                 "text": item["text"]}
                 for item in entry["messages"]
                 if item["at"] >= cutoff
             ]
@@ -489,7 +491,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 parsed if path == "/v1/logs" else (),
                 parsed if path == "/v1/traces" else (),
             ):
-                print(line, flush=True)
+                print(f"[{ist_timestamp()}] {line}", flush=True)
         self._respond_proto(response)
 
     def do_GET(self):

@@ -161,7 +161,7 @@ def summarize_incident(service_name, window, anomaly, silence_seconds, use_llm=T
             # Reasoning tokens share the output budget with the final JSON.
             # Retry the identical evidence once, through the normal pacer.
             retry_tokens = MODEL_OUTPUT_TOKENS * 2
-            print(f"[{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
+            print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
             reply = llm.chat_json(messages, service_name=service_name, max_tokens=retry_tokens)
         summary = reply.get("summary") if isinstance(reply, dict) else None
         if not isinstance(summary, str) or not summary.strip():
@@ -170,12 +170,12 @@ def summarize_incident(service_name, window, anomaly, silence_seconds, use_llm=T
         return {**anomaly, "summary": report["summary"]}
     except Exception as exc:  # model unavailable or unusable response
         failure = str(exc) if isinstance(exc, llm.LlmError) else f"model check failed ({type(exc).__name__})"
-        print(f"[{STEP}] {service_name}: {failure}; using rules", flush=True)
+        print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {failure}; using rules", flush=True)
         return anomaly
     finally:
         if call_started is not None:
             result = "fallback" if failure else "summarized"
-            print(f"[{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
+            print(f"[{state.ist_timestamp()}] [{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
                   f"prompt_bytes={prompt_bytes} elapsed_s={time.monotonic()-call_started:.2f} "
                   f"result={result}", flush=True)
         if on_model_result is not None:

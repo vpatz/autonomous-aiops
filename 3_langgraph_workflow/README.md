@@ -155,7 +155,12 @@ memory, and cgroup usage for two seconds. It removes at most one active service
 accounting for at least 10% of host CPU or RAM while that resource is above 80%.
 Eligible services are the injector's VM-specific transient `chaos-stress-…` units
 and `rheluser`'s disposable `aiops-disposable-*.service` files located directly
-in `~/.config/systemd/user/`. The latter are backed up under
+in `~/.config/systemd/user/`. To opt in another user-local service, add its exact
+unit name to `/etc/aiops/removable-user-services` on that guest (root-owned
+file and directory; no group/world write). The job attributes process CPU and
+memory to the owning systemd cgroup and records the unit and PIDs. It never
+kills arbitrary PIDs or removes the demo, SSH, or networking service.
+User-local units are backed up under
 `~/.local/state/aiops-recovery/` before being disabled and removed. To restore
 one, copy the backup to the original directory, run `systemctl --user daemon-reload`,
 and restore its previous enabled/running state. No eligible contributor under
@@ -226,7 +231,10 @@ VM and 5 seconds between starts across VMs.
   per-VM evidence snapshot, including guest OTLP and load-generator outcomes.
   Evidence keys remain stable even if the collector's rolling window advances
   while RCA checks the guest. After remediation, a new investigation uses the
-  new verification snapshot. Each iteration asks the model for
+  new verification snapshot. RCA may end with **No remediation needed** when
+  fresh guest telemetry since the incident clears the rules. An unknown cause,
+  missing guest metrics, or the model's suggestion alone does not qualify.
+  This outcome bypasses selection and execution. Each iteration asks the model for
   the next action as a JSON decision (`call_tool` with arguments, or
   `conclude` with a root cause) over the *live* MCP `tools/list` catalog,
   together with the investigation history. Against the real linux-mcp
@@ -243,7 +251,7 @@ configured, and the findings trail names the tool the model chose at each
 iteration.
 
 Each VM card keeps the last 100 anomaly summaries since workflow startup,
-oldest first. Each response appends one plain-text line with its UTC timestamp,
+oldest first. Each response appends one plain-text line with its India Standard Time timestamp,
 phase, source (LLM or rule fallback), severity, and summary. Healthy polls add no lines.
 The detector allows 4,096 completion tokens, including model reasoning. If the
 endpoint reports an output-length cutoff before a JSON verdict is available,

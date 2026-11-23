@@ -6,6 +6,7 @@ from pathlib import Path
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,9 +31,27 @@ def host_sample():
     return sum(cpu), cpu[3] + cpu[4], total, 100 * (1 - free / total)
 
 
-def unit_info(vm, user, name):
-    pattern = r"aiops-disposable-[a-zA-Z0-9_-]+\.service" if user else rf"chaos-stress-{re.escape(vm)}-[0-9]+\.service"
-    if not re.fullmatch(pattern, name):
+def user_allowlist():
+    path = Path("/etc/aiops/removable-user-services")
+    if not path.exists():
+        return set()
+    if (path.resolve() != path or not stat.S_ISREG(path.stat().st_mode)
+            or any(p.stat().st_uid != 0 or p.stat().st_mode & 0o022 for p in (path, path.parent))):
+        raise ValueError("unsafe removable-user-services configuration")
+    return {line.strip() for line in path.read_text().splitlines()
+            if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*\.service", line.strip())}
+
+
+def eligible(vm, user, name, allowed):
+    if name in ("aiops-demo.service", "sshd.service", "NetworkManager.service"):
+        return False
+    if user:
+        return bool(name in allowed or re.fullmatch(r"aiops-disposable-[a-zA-Z0-9_-]+\.service", name))
+    return bool(re.fullmatch(rf"chaos-stress-{re.escape(vm)}-[0-9]+\.service", name))
+
+
+def unit_info(vm, user, name, allowed):
+    if not eligible(vm, user, name, allowed):
         return None
     props = "Id,ActiveState,ControlGroup,InvocationID,FragmentPath,Transient,RequiredBy,BoundBy,TriggeredBy"
     data = dict(line.split("=", 1) for line in ctl(user, "show", name, "--property", props).splitlines())
@@ -56,11 +75,12 @@ def unit_info(vm, user, name):
 def main(vm):
     if not re.fullmatch(r"rhel10-service-[1-4]", vm) or pwd.getpwuid(os.getuid()).pw_name != "rheluser":
         raise ValueError("requires the demo VM and its unprivileged demo account")
+    allowed = user_allowlist()
     candidates = []
-    for user, glob in [(True, "aiops-disposable-*.service"), (False, f"chaos-stress-{vm}-*.service")]:
+    for user, glob in [(True, "*.service"), (False, f"chaos-stress-{vm}-*.service")]:
         for line in ctl(user, "list-units", "--state=active", "--no-legend", "--plain", glob).splitlines():
             name = line.split()[0]
-            info = unit_info(vm, user, name)
+            info = unit_info(vm, user, name, allowed)
             if info:
                 try:
                     candidates.append((user, name, info, cpu_usec(info[2])))
@@ -84,12 +104,14 @@ def main(vm):
             continue
         impact = max(cpu_share if cpu > THRESHOLD else 0, ram_share if memory > THRESHOLD else 0)
         if impact >= MIN_SHARE:
-            ranked.append((impact, user, name, info))
+            ranked.append((impact, user, name, info, cpu_share, ram_share))
     if not ranked:
         raise RuntimeError("pressure persists but no removable service is a significant contributor")
-    _, user, name, info = max(ranked)
-    if info != unit_info(vm, user, name):
+    _, user, name, info, cpu_share, ram_share = max(ranked)
+    if info != unit_info(vm, user, name, user_allowlist()):
         raise RuntimeError("candidate changed during measurement")
+    result.update(unit_cpu_pct=round(cpu_share, 1), unit_memory_pct=round(ram_share, 1),
+                  pids=[int(p) for p in (info[2] / "cgroup.procs").read_text().split()][:16])
     if user:
         backup_dir = Path.home() / ".local/state/aiops-recovery"
         backup_dir.mkdir(parents=True, mode=0o700, exist_ok=True)

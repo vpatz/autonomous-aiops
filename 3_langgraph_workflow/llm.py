@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from state import ist_timestamp
 
 STEP = "llm client"
 DEFAULT_MODEL = "rits/meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
@@ -103,7 +104,7 @@ def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=No
     request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
     if service_name is not None:
         _pacer.wait(service_name)
-        print(f"[llm client] {service_name} model call starting", flush=True)
+        print(f"[{ist_timestamp()}] [llm client] {service_name} model call starting", flush=True)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             body = json.loads(response.read().decode("utf-8", "replace"))

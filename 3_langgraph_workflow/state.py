@@ -18,6 +18,7 @@ Verify:
 
 import operator
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, TypedDict
 
 STEP = "workflow state"
@@ -34,6 +35,7 @@ STATUS_INVESTIGATING = "investigating"
 STATUS_REMEDIATING = "remediating"
 STATUS_REMEDIATED = "remediated"
 STATUS_FAILED = "failed"
+STATUS_NO_ACTION = "no_remediation_needed"
 
 DEFAULT_WINDOW_SECONDS = 120
 LLM_EVIDENCE_SECONDS = 10
@@ -47,6 +49,15 @@ DEFAULT_VERIFY_WAIT_SECONDS = 30
 
 def utc_timestamp():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+def ist_timestamp(when=None):
+    """Human-facing log time; stored OTLP and API instants remain UTC."""
+    when = datetime.fromisoformat(when.replace("Z", "+00:00")) if when else datetime.now(IST)
+    return when.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
 
 class WorkflowState(TypedDict, total=False):
@@ -68,6 +79,7 @@ class WorkflowState(TypedDict, total=False):
     iteration: int
     max_iterations: int
     verify_since: float
+    incident_since: float
     status: str
 
 

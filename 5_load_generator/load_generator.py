@@ -47,10 +47,12 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 STEP = "load generator"
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 DEFAULT_NAMESPACE = "my-vm-project"
 DEFAULT_SSH_USER = "rheluser"
 DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
@@ -288,7 +290,8 @@ def run_load(cfg):
         telemetry.record(vm, code)
         success = isinstance(code, int) and 200 <= code < 400
         tag = "ok" if success else "fail"
-        print(f"[{STEP}] {n:4d} vm={result['vm']:20s} {result['path']:8s} -> {code} ({tag}) via={result['via']}", flush=True)
+        print(f"[{datetime.now(IST):%Y-%m-%d %H:%M:%S %Z}] [{STEP}] {n:4d} vm={result['vm']:20s} "
+              f"{result['path']:8s} -> {code} ({tag}) via={result['via']}", flush=True)
         return success
 
     start = time.monotonic()

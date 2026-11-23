@@ -52,7 +52,8 @@ def build_graph(
         silence_seconds=silence_seconds, use_llm=use_llm, get_evidence=get_evidence,
         on_model_result=on_model_result))
     graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-        linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress))
+        linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress,
+        get_window=get_window, silence_seconds=silence_seconds))
     graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
         ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None, on_progress=on_progress))
     graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
@@ -85,7 +86,7 @@ def run(app, workflow_state, label=None, print_steps=True, on_step=None):
             findings = snapshot.get("findings") or []
             if print_steps:
                 for line in findings[seen:]:
-                    print(f"  [{label}] {line}", flush=True)
+                    print(f"[{state.ist_timestamp()}] [{label}] {line}", flush=True)
             seen = len(findings)
         if final:
             output.update(status=final.get("status"), attempts=final.get("attempts"))

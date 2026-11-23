@@ -45,7 +45,7 @@ Load-generator pod ── GET / or /health ──► Flask service on a randomly
 | A previously reporting VM goes silent and KubeVirt confirms it is halted | `restart_vm` | [Start that VM through the KubeVirt API](playbooks/restore-vm.yml) |
 | CPU or memory exceeds 80% and a disposable service contributes to the pressure | `cleanup_pressure` | [Remove one contributing workload and check VM stability](playbooks/cleanup-pressure.yml) |
 
-Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/restart-aiops.yml) targets one named VM; not every anomaly has an approved recovery action.
+Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/restart-aiops.yml) targets one named VM; not every anomaly has an approved recovery action. If fresh guest telemetry confirms the triggering conditions have cleared, RCA can conclude **No remediation needed** and end the investigation without dispatching a job. The dashboard shows incident, RCA and remediation log times in India Standard Time (IST).
 
 ## Run it on OpenShift
 

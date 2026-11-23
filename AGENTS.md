@@ -145,7 +145,10 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Keep `rulebooks/restart-aiops.yml` and the controller templates in sync with
   the executor: `restart` starts the unit over SSH; `restart_vm` starts a halted
   VM through the API using `playbooks/vm-recovery-rbac.yaml`. Silence alone
-  does not authorize powering on a VM. Sync the AAP projects and refresh the
+  does not authorize powering on a VM. `cleanup_pressure` uses guest cgroup
+  measurements and a scoped disposable-service policy (`playbooks/cleanup-pressure.yml`).
+  RCA may end without dispatch when fresh guest telemetry clears the incident.
+  Sync the AAP projects and refresh the
   activation after rulebook edits.
 - `2_aiops_heuristic/agent-pod.yaml` sets only `EDA_EVENT_PASSWORD` (value `collect-only`)
   and no `EDA_EVENT_URL`, so stage-2 EDA posting is disabled until a URL is added.

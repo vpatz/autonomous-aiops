@@ -250,7 +250,7 @@ class WorkflowHandler(collector.CollectorHandler):
     def progress(cls, service, panel, message):
         with cls.changed:
             cls.runs[service] = {**cls.runs.get(service, {}), "pending": {
-                panel: f"[{state.utc_timestamp()}] {message}"}}
+                panel: f"[{state.ist_timestamp()}] {message}"}}
             cls.revision += 1
             cls.changed.notify_all()
 
@@ -373,7 +373,7 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
         for entry in history:
             verdict = entry["verdict"]
             source = "LLM" if verdict["source"] == "llm" else "rules"
-            text = f"[{entry['at']}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
+            text = f"[{state.ist_timestamp(entry['at'])}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
             if entry["failure"]:
                 text += f" (model error: {entry['failure']})"
             incident_lines.append(" ".join(text.split()))
@@ -700,8 +700,11 @@ def render_dashboard_shell():
       return text.length > 180 ? text.slice(0, 179) + '…' : text;
     }
 
+    function istTime(at) {
+      return new Date(new Date(at).getTime() + 330 * 60000).toISOString().slice(0, 19).replace('T', ' ') + ' IST';
+    }
     function stamped(at, message) {
-      return at ? `[${at}] ${message}` : message;
+      return at ? `[${istTime(at)}] ${message}` : message;
     }
 
     function rcaMessage(run) {
@@ -719,6 +722,7 @@ def render_dashboard_shell():
     }
 
     function remedyMessage(run) {
+      if (run?.status === 'no_remediation_needed') return stamped(run.updated_at, 'No remediation needed: ' + run.root_cause.summary);
       if (run?.pending?.remedy) return run.pending.remedy;
       const actions = (run?.plan || []).map(step => step.tool).join(', ');
       if (!actions) {
@@ -763,7 +767,7 @@ def render_dashboard_shell():
 
       // Message feed: updated on every poll, regardless of run state.
       const lines = (svc.messages || []).map(function (m) {
-        return '[' + Math.round(m.age_seconds) + 's ago] ' + m.text;
+        return stamped(m.received_ms, m.text);
       });
       refs.msgBox.value = lines.length ? lines.join('\n')
                                        : 'no messages in the last 30s';
@@ -797,7 +801,7 @@ def render_dashboard_shell():
       const anomalies = data.services.filter(s => s.run && s.run.anomaly && s.run.anomaly.detected).length;
       statsEl.textContent = data.services.length + ' VMs · ' + flowing + ' flowing · ' +
         anomalies + ' anomaly · llm ' + (data.meta.llm ? 'on' : 'off') +
-        ' · updated ' + new Date(data.meta.generated_at).toLocaleTimeString();
+        ' · updated ' + istTime(data.meta.generated_at);
       // Cards are created on first sight and never removed: a VM that goes
       // down keeps its card (color-coded red) with the last known state.
       data.services.forEach(function (svc) {
@@ -862,6 +866,7 @@ def serve_forever(args):
 
     def run_for_service(service_name, telemetry, trigger):
         try:
+            incident_since = time.monotonic()
             snapshot = {}
             WorkflowHandler.publish_run(service_name, {"running": True})
             anomaly = anomaly_detector.summarize_incident(
@@ -877,6 +882,7 @@ def serve_forever(args):
                 max_attempts=args.max_attempts,
             )
             workflow_state["anomaly"] = anomaly
+            workflow_state["incident_since"] = incident_since
             workflow_state["detector_evidence"] = snapshot
             def publish_step(snapshot):
                 keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
@@ -940,6 +946,7 @@ def run_once(args):
                 if not store.window(service_name, 1)["ever_seen"]:
                     continue
                 window = store.window(service_name, args.window_seconds)
+                incident_since = time.monotonic()
                 snapshot = {}
                 quick = anomaly_detector.detect_window(service_name, window, args.silence_seconds,
                                                        get_evidence=store.recent_evidence,
@@ -967,6 +974,7 @@ def run_once(args):
                 max_attempts=args.max_attempts,
             )
             initial["anomaly"] = quick
+            initial["incident_since"] = incident_since
             initial["detector_evidence"] = snapshot
             final = graph.run(app, initial, label=target)
             print(f"{STEP}: final status: {(final or {}).get('status')}", flush=True)

@@ -19,9 +19,11 @@ Verify:
 
 import argparse
 import json
+import time
 
 import llm
 import agent_tracing
+import anomaly_detector
 import mcp_client
 import state
 
@@ -85,7 +87,10 @@ def _llm_next_action(service_name, anomaly, investigation, tools, iteration, max
         '{"action": "call_tool", "tool": "<name>", "arguments": {...}}\n'
         "or, once you know the root cause:\n"
         '{"action": "conclude", "root_cause": {"component": "...", "summary": "...", '
-        '"confidence": "high|medium|low"}}\n\n'
+        '"confidence": "high|medium|low"}}\n'
+        'If the incident appears transient and has cleared, you may instead return '
+        '{"action":"no_remediation_needed","reason":"why no action is indicated"}. '
+        'The workflow verifies this against fresh guest telemetry.\n\n'
         "Ground every argument in these facts (never invent names):\n"
         f"- The service runs on VM '{service_name}'. Any 'host' argument must be "
         f"exactly '{service_name}'.\n"
@@ -142,7 +147,29 @@ def _conclude(investigation):
     }
 
 
-def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None):
+def cleared_since_incident(workflow_state, get_window, silence_seconds):
+    """Require recent *guest* evidence after the trigger (and any intervening action)."""
+    since = max(workflow_state.get("incident_since", 0), workflow_state.get("verify_since", 0))
+    if not get_window or not since or time.monotonic() - since < silence_seconds:
+        return False
+    current = get_window(workflow_state["service_name"], silence_seconds, since=since)
+    metrics = current.get("metrics", {})
+    if not current.get("ever_seen") or current.get("last_seen_seconds_ago") is None:
+        return False
+    if not all(isinstance(metrics.get(k), (float, int))
+            for k in ("service.uptime", "service.cpu.load", "service.memory.load")):
+        return False
+    original = workflow_state.get("anomaly", {}).get("signals", [])
+    if not original or anomaly_detector.analyze_window(current, silence_seconds)["detected"]:
+        return False
+    if {"error-logs", "failed-spans"}.intersection(original):
+        return any(s.get("status_code") in (0, 1) and s.get("name", "").startswith("GET ")
+                   for s in current.get("traces", []))
+    return True
+
+
+def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None,
+               get_window=None, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
     """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
     @agent_tracing.agent(state.NODE_RCA)
@@ -158,6 +185,13 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None
             if on_progress:
                 on_progress(service_name, "rca", f"Iteration {iteration}: {message}")
 
+        def no_action(reason):
+            return Command(goto="__end__", update={
+                "status": state.STATUS_NO_ACTION, "iteration": iteration, "detector_evidence": {},
+                "root_cause": {"at": state.utc_timestamp(), "component": service_name,
+                               "summary": reason, "confidence": "high", "found": False},
+                "findings": [f"[{STEP}] No remediation needed: {reason}"]})
+
         progress("Checking host state and available diagnostics…")
         if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
                 and is_vm_halted(service_name)):
@@ -166,7 +200,11 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None
                  "iteration": iteration, "vm_halted": True, "detector_evidence": {},
                  "root_cause": {"at": state.utc_timestamp(), "component": "VirtualMachine", "confidence": "high",
                                "summary": summary, "found": True},
-                "findings": [f"[{STEP}] {summary}"]})
+                 "findings": [f"[{STEP}] {summary}"]})
+
+        cleared = "Fresh guest telemetry no longer triggers the incident rules."
+        if cleared_since_incident(workflow_state, get_window, silence_seconds):
+            return no_action(cleared)
 
         tools = []
         if linux_mcp is not None:
@@ -188,6 +226,12 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None
                 )
             except Exception:  # noqa: BLE001 - LLM is best effort
                 decision = None
+        if decision and decision.get("action") == "no_remediation_needed":
+            if cleared_since_incident(workflow_state, get_window, silence_seconds):
+                reason = decision.get("reason")
+                return no_action(f"{cleared} {truncate(reason, 240)}"
+                                 if isinstance(reason, str) and reason.strip() else cleared)
+            decision = None  # No model-only dismissal of an unresolved incident.
         if decision is None:
             if linux_mcp is None:
                 # No MCP server configured: conclude from telemetry alone.
@@ -295,6 +339,23 @@ def self_check():
     workflow_state = state.initial_state("vm-1")
     workflow_state["anomaly"] = {"detected": True, "signals": ["error-logs"], "summary": "error logs"}
     from langgraph.types import Command
+
+    # A transient spike clearing is a legitimate conclusion, not a successful
+    # repair or a reason to send any event. Silence and missing gauges can't clear it.
+    incident = {**state.initial_state("vm-1"), "incident_since": time.monotonic() - 30,
+                "anomaly": {"detected": True, "signals": ["cpu-saturation"]}}
+    fresh = {"ever_seen": True, "last_seen_seconds_ago": 1, "metrics": {
+        "service.uptime": 500, "service.cpu.load": 10, "service.memory.load": 40}}
+    def get_fresh(vm, seconds, since):
+        assert vm == "vm-1" and since == incident["incident_since"]
+        return fresh
+    snapshot = build_node(use_llm=False, get_window=get_fresh)(incident)
+    assert snapshot.goto == "__end__" and snapshot.update["status"] == state.STATUS_NO_ACTION
+    assert "remediation" not in snapshot.update
+    fresh["metrics"]["service.cpu.load"] = 95
+    assert not cleared_since_incident(incident, get_fresh, 10)
+    fresh["metrics"].clear()
+    assert not cleared_since_incident(incident, get_fresh, 10)
 
     iterations = 0
     while True:
