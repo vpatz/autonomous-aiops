@@ -3,7 +3,7 @@
 GET /        page with a timer that starts when the page loads
 GET /health  whether this process is serving requests
 
-Only GET / multiplies two random 75x75 matrices.
+Only GET / multiplies two random 75x75 matrices and simulates an I/O wait.
 
 Metrics, logs and traces are pushed over OTLP/HTTP to
 OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318). Metrics
@@ -57,6 +57,9 @@ os.environ.setdefault("OTEL_BLRP_SCHEDULE_DELAY", "2000")
 
 app = Flask(__name__)
 STARTED_AT = time.time()
+PAGE_IO_DELAY_MS = int(os.environ.get("PAGE_IO_DELAY_MS", "100"))
+if PAGE_IO_DELAY_MS < 0:
+    raise ValueError("PAGE_IO_DELAY_MS must be nonnegative")
 
 _resource = Resource.create({"service.name": os.environ["OTEL_SERVICE_NAME"]})
 
@@ -274,6 +277,8 @@ def _health_payload():
 @app.get("/")
 def workload():
     _matrix_workload()
+    if PAGE_IO_DELAY_MS:
+        time.sleep(PAGE_IO_DELAY_MS / 1000)
     page_loads.add(1)
     return render_template_string(PAGE, hostname=socket.gethostname())
 

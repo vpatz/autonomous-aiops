@@ -20,8 +20,9 @@ python3 3_langgraph_workflow/workflow.py --self-check
 
 ## How the live demo works
 
-Each call to `/` multiplies two random 75×75 matrices to exercise guest CPU.
-`/health` is a lightweight process health check.
+Each call to `/` multiplies two random 75×75 matrices and simulates a 100 ms
+I/O wait so concurrent requests overlap. Set `PAGE_IO_DELAY_MS=0` in the service
+environment to disable the wait. `/health` skips both the multiplication and the delay.
 
 ```text
 Load-generator pod ── GET / or /health ──► Flask service on a randomly selected VM
