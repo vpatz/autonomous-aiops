@@ -63,7 +63,7 @@ def build_graph(
     return graph.compile()
 
 
-def run(app, workflow_state, label=None, print_steps=True):
+def run(app, workflow_state, label=None, print_steps=True, on_step=None):
     """Run the graph to completion, printing new findings as they appear.
 
     Returns the final state. Uses stream mode "values" so the demo shows the
@@ -79,6 +79,8 @@ def run(app, workflow_state, label=None, print_steps=True):
                             workflow=True) as output:
         for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
             final = snapshot
+            if on_step is not None:
+                on_step(snapshot)
             findings = snapshot.get("findings") or []
             if print_steps:
                 for line in findings[seen:]:

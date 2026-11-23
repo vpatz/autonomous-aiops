@@ -68,7 +68,7 @@ Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/
    echo "https://$(oc -n my-vm-project get route aiops-workflow -o jsonpath='{.spec.host}')"
    ```
 
-   Each VM card refreshes every two seconds. Watch the CPU, memory, and concurrent-request dials and expand the RCA and remediation text boxes for tool outputs, findings, and recovery results. **Anomaly summaries (newest last)** appends a timestamped plain-text line per incident summary from the LLM (or the rules if unavailable). Healthy windows do not call the model or append a line. The dashboard data is also available at `/api/dashboard`.
+   Each VM card refreshes every two seconds. Expand RCA for one plain-text line per tool call and the final diagnosis. Remediation shows the action and recovery outcome on one line. **Anomaly summaries (newest last)** appends a timestamped plain-text line per incident summary from the LLM (or the rules if unavailable). Healthy windows do not call the model or append a line. Detailed tool outputs, findings, and results remain available at `/api/dashboard`.
 
 5. **Exercise a failure.** Once the VM is reporting telemetry, try a targeted scenario:
 

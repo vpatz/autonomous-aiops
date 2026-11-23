@@ -312,11 +312,9 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
             vm_status = "silent"
         run = runs_snapshot.get(name)
         run_view = None
-        if run and run.get("running"):
-            run_view = {"status": "running"}
-        elif run:
+        if run:
             run_view = {
-                "status": run.get("status"),
+                "status": "running" if run.get("running") else run.get("status"),
                 "anomaly": run.get("anomaly", {}),
                 "root_cause": run.get("root_cause", {}),
                 "investigation": run.get("investigation", []),
@@ -638,8 +636,10 @@ def render_dashboard_shell():
       model.box.wrap = 'off';
 
       const rca = outputPanel(root, 'Root cause analysis output', svc.name);
+      rca.box.wrap = 'off';
 
       const remedy = outputPanel(root, 'Remediation plan and result', svc.name);
+      remedy.box.wrap = 'off';
 
       const messages = outputPanel(root, 'last 30s messages', svc.name, 6);
 
@@ -655,6 +655,46 @@ def render_dashboard_shell():
       node.className = 'pill ' + cls;
       node.textContent = text;
       if (withDot) { node.prepend(el('span', 'dot')); }
+    }
+
+    function toolSnippet(output) {
+      let text = String(output || '').trim();
+      if (/^[{[]/.test(text)) {
+        try {
+          const data = JSON.parse(text);
+          text = [data.summary, data.message, data.text, data.status].find(v => typeof v === 'string')
+            || (Array.isArray(data) ? `Returned ${data.length} records` : `Returned fields: ${Object.keys(data).join(', ')}`);
+        } catch (_) { text = 'Structured tool output received'; }
+      }
+      text = text.replace(/\s+/g, ' ').trim();
+      return text.length > 180 ? text.slice(0, 179) + '…' : text;
+    }
+
+    function rcaMessage(run) {
+      const lines = (run?.investigation || []).map(step => {
+        const arg = step.arguments?.command || step.arguments?.service_name || step.arguments?.path;
+        const snippet = toolSnippet(step.output);
+        return `Iteration ${step.iteration}: ${step.tool}${arg ? ' — ' + arg : ''} (${step.status})` +
+          (snippet ? ': ' + snippet : '');
+      });
+      const rc = run?.root_cause;
+      if (rc?.summary) lines.push(`Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`);
+      return lines.length ? lines.map(line => line.replace(/\s+/g, ' ').trim()).join('\n')
+        : (run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
+    }
+
+    function remedyMessage(run) {
+      const actions = (run?.plan || []).map(step => step.tool).join(', ');
+      if (!actions) {
+        const reason = run?.remediation?.rationale || run?.remedy_findings?.at(-1);
+        return reason ? reason.replace(/^\[[^\]]+\]\s*/, '')
+          : (run?.status === 'running' ? 'Workflow in progress; awaiting remediation outcome.' : 'No remediation recorded.');
+      }
+      const eda = run.result?.eda?.status;
+      const outcome = run.status === 'remediated' ? 'Recovery verified'
+        : run.status === 'failed' ? 'Recovery failed' : 'Recovery not yet verified';
+      return `${outcome}: ${actions} (attempts ${run.attempts}/${run.max_attempts})` +
+        (eda && eda !== 'not configured' ? `; EDA: ${eda}` : '');
     }
 
     function updateCard(svc, refs) {
@@ -694,18 +734,8 @@ def render_dashboard_shell():
       refs.msgBox.scrollTop = refs.msgBox.scrollHeight;
 
       const run = svc.run;
-      const waiting = run && run.status === 'running' ? 'Workflow in progress. ' : '';
-      const rc = (run && run.root_cause) || {};
-      const investigation = (run && run.investigation) || [];
-      const remediation = (run && run.remediation) || {};
-      const result = (run && run.result) || {};
-      refs.rcaBox.value = Object.keys(rc).length || investigation.length || run?.rca_findings?.length
-        ? JSON.stringify({root_cause: rc, investigation, findings: run.rca_findings}, null, 2)
-        : waiting + 'No root cause recorded.';
-      refs.remedyBox.value = Object.keys(remediation).length || Object.keys(result).length || run?.remedy_findings?.length
-        ? JSON.stringify({status: run.status, attempts: run.attempts, max_attempts: run.max_attempts,
-                          remediation, result, findings: run.remedy_findings}, null, 2)
-        : waiting + 'No remediation plan or execution result recorded.';
+      refs.rcaBox.value = rcaMessage(run);
+      refs.remedyBox.value = remedyMessage(run).replace(/\s+/g, ' ').trim();
       if (!run) {
         setPill(refs.anomalyPill, 'ok', 'not detected', false);
         refs.anomalyText.textContent = '';
@@ -809,7 +839,14 @@ def serve_forever(args):
             )
             workflow_state["anomaly"] = anomaly
             workflow_state["detector_evidence"] = snapshot
-            final = graph.run(app, workflow_state, label=service_name)
+            def publish_step(snapshot):
+                keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
+                        "findings", "attempts", "max_attempts")
+                with WorkflowHandler.runs_lock:
+                    WorkflowHandler.runs[service_name] = {
+                        "running": True, **{k: snapshot[k] for k in keys if k in snapshot}}
+
+            final = graph.run(app, workflow_state, label=service_name, on_step=publish_step)
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
             close_clients(linux, ansible)
