@@ -20,7 +20,7 @@ python3 3_langgraph_workflow/workflow.py --self-check
 
 ## How the live demo works
 
-Each Flask call to `/` or `/health` generates two random 50×50 matrices and
+Each Flask call to `/` or `/health` generates two random 100×100 matrices and
 multiplies them before responding, so the HTTP ramp exercises guest CPU.
 
 ```text

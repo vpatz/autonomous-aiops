@@ -3,7 +3,7 @@
 GET /        page with a timer that starts when the page loads
 GET /health  whether this process is serving requests
 
-Both endpoints multiply two freshly generated 50x50 matrices per request.
+Both endpoints multiply two freshly generated 100x100 matrices per request.
 
 Metrics, logs and traces are pushed over OTLP/HTTP to
 OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
@@ -103,7 +103,7 @@ def count_request_start():
 
 
 def _matrix_workload():
-    size = 50
+    size = 100
     left = [[random.random() for _ in range(size)] for _ in range(size)]
     right = [[random.random() for _ in range(size)] for _ in range(size)]
     columns = list(zip(*right))
