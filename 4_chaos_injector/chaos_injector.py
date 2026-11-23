@@ -53,7 +53,7 @@ from concurrent.futures import ThreadPoolExecutor
 STEP = "chaos injector"
 SERVICE_UNIT = "aiops-demo.service"
 COLLECTOR_PORT = 4318  # the telemetry port blocked by block/alter-telemetry
-OTLP_INTERVAL_SECONDS = 5
+OTLP_INTERVAL_SECONDS = 2
 DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
 
 ZEROS = {"service.uptime": 999.0, "service.cpu.load": 0.0, "service.memory.load": 0.0}

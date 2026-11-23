@@ -6,8 +6,9 @@ GET /health  whether this process is serving requests
 Both endpoints multiply two freshly generated 100x100 matrices per request.
 
 Metrics, logs and traces are pushed over OTLP/HTTP to
-OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
-OTEL_METRIC_EXPORT_INTERVAL ms. Host CPU and memory load are
+OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318). Metrics
+are exported every 2s by default; log and span batches also flush on a 2s timer.
+Host CPU and memory load are
 service.cpu.load and service.memory.load. service.requests.active counts
 HTTP requests currently being handled by this process at collection time.
 
@@ -50,7 +51,9 @@ except ImportError:  # future renames
 
 os.environ.setdefault("OTEL_SERVICE_NAME", "aiops-service-app")
 os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://192.168.64.1:4318")
-os.environ.setdefault("OTEL_METRIC_EXPORT_INTERVAL", "5000")
+os.environ.setdefault("OTEL_METRIC_EXPORT_INTERVAL", "2000")
+os.environ.setdefault("OTEL_BSP_SCHEDULE_DELAY", "2000")
+os.environ.setdefault("OTEL_BLRP_SCHEDULE_DELAY", "2000")
 
 app = Flask(__name__)
 STARTED_AT = time.time()

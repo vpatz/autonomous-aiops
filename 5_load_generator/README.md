@@ -13,7 +13,7 @@ oc rollout status -n my-vm-project deployment/aiops-load-generator
 oc logs -f -n my-vm-project deployment/aiops-load-generator
 ```
 
-The single-replica Deployment runs the repeating ramp and sends its five-second
+The single-replica Deployment runs the repeating ramp and sends its two-second
 response batches to `http://aiops-workflow:4318`. It calls each guest on port
 5000 through its own internal `rhel10-service-N-http` Service. The generator
 pod needs no SSH key or cluster API credentials. The guests must accept TCP
@@ -48,7 +48,7 @@ See `load_generator.py --help` for all flags.
 
 ### Client response telemetry
 
-Every five seconds the generator posts OTLP protobuf to `/v1/logs`. Each target
+Every two seconds the generator posts OTLP protobuf to `/v1/logs`. Each target
 gets one log record per UTC second, counting **completed** requests by HTTP
 status. `no_response` means no HTTP status was received (e.g. a timeout or SSH
 failure); `{}` means no completions. Skipped load slots are not requests.

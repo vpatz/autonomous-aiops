@@ -78,7 +78,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_SERVICE_NAME=local-demo \
 python3 1_vm_services/service.py
 ```
 
-The service sends metrics every 5s. Kill it (`kill -9` the python process)
+The service sends metrics every 2s. Kill it (`kill -9` the python process)
 to simulate the chaos injector's `kill-service` scenario: the workflow
 detects the silence, investigates through the mock linux-mcp, runs the
 approved remediation through the mock Ansible MCP, and waits for telemetry

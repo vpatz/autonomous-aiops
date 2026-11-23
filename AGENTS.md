@@ -112,7 +112,7 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Stage 2: `receive_otel.py` and `call_eda.py` insert `eda/` into `sys.path`
   (`__file__`-relative) and import `receive_metrics` / `send_restart_event` as top-level
   modules — do not move or rename files without updating those inserts.
-- `service.py` runs cleanly and only pushes telemetry (metrics every 5s, Flask
+- `service.py` runs cleanly and only pushes telemetry (metrics every 2s, Flask
   request spans, an OTLP log pipeline). Faults are injected exclusively by the
   stage-4 chaos injector; the systemd unit has `Restart=no`, so a killed service
   stays down until the workflow remediates it. The detector still recognizes a

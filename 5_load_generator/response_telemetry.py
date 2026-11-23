@@ -1,4 +1,4 @@
-"""Export one-second client observations as five-second OTLP/HTTP log batches."""
+"""Export one-second client observations as two-second OTLP/HTTP log batches."""
 
 import json
 import threading
@@ -8,6 +8,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
+
+EXPORT_INTERVAL_SECONDS = 2
 
 
 def encode_batch(targets, start, stop, counts):
@@ -64,10 +66,10 @@ class ResponseTelemetry:
             print(f"[load generator] telemetry batch {start}..{end-1} not delivered: {exc}", flush=True)
 
     def run(self):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + EXPORT_INTERVAL_SECONDS
         while not self.stop.wait(max(0, deadline - time.monotonic())):
             self.flush()
-            deadline += 5
+            deadline += EXPORT_INTERVAL_SECONDS
 
     def __exit__(self, *_):
         self.stop.set()

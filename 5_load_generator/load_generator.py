@@ -336,7 +336,7 @@ def main():
     parser.add_argument("--vm", action="append", default=[], help="target VM (comma-separated; repeatable)")
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE, help="KubeVirt namespace")
     parser.add_argument("--collector-url", default=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
-                        help="OTLP/HTTP collector base URL for five-second response batches")
+                        help="OTLP/HTTP collector base URL for two-second response batches")
     parser.add_argument("--url", action="append", default=[], dest="urls", help="direct HTTP base URL (repeatable; e.g. http://localhost:5000). When set, transport is http.")
     parser.add_argument("--url-template", default="", help="URL template with {vm} and {path} placeholders, e.g. http://{vm}.my-vm-project.svc.cluster.local:5000{path}")
     parser.add_argument("--ssh-user", default=DEFAULT_SSH_USER, help="SSH user for oc virt ssh")
