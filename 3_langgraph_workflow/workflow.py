@@ -597,8 +597,8 @@ def render_dashboard_shell():
       const dials = el('div', 'dials');
       const cpu = makeDial('host cpu');
       const mem = makeDial('host memory');
-      const requests = makeDial('peak concurrent requests · 10s', 32);
-      requests.node.title = 'Maximum overlap of HTTP server spans received in the last 10s. Dial scale: 0–32.';
+      const requests = makeDial('current concurrent requests', 32);
+      requests.node.title = 'HTTP requests in flight on this VM at the latest metric export (every 2s). Dial scale: 0–32.';
       dials.appendChild(cpu.node); dials.appendChild(mem.node);
       dials.appendChild(requests.node);
       const side = el('div', 'side-stats');
@@ -606,7 +606,6 @@ def render_dashboard_shell():
       const restarts = sideStat(side, 'restarts 10m');
       const signals = sideStat(side, 'm / l / t');
       const fault = sideStat(side, 'fault flag');
-      const sampled = sideStat(side, 'in flight at export');
       dials.appendChild(side);
       root.appendChild(dials);
 
@@ -650,7 +649,7 @@ def render_dashboard_shell():
 
       cardsRoot.appendChild(root);
       return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
-               restarts: restarts, signals: signals, fault: fault, sampled: sampled,
+               restarts: restarts, signals: signals, fault: fault,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
                rcaText: rcaText, rcaFill: rcaFill,
                remText: remText, remFill: remFill, edaChip: edaChip,
@@ -686,8 +685,7 @@ def render_dashboard_shell():
       const muted = vm.status !== 'flowing';
       refs.cpu.set(service.cpu, '%', muted || service.cpu == null);
       refs.mem.set(service.memory, '%', muted || service.memory == null);
-      refs.requests.set(service.peak_requests, '', muted || service.peak_requests == null);
-      refs.sampled.textContent = muted || service.active_requests == null ? '—' : String(service.active_requests);
+      refs.requests.set(service.active_requests, '', muted || service.active_requests == null);
       refs.uptime.textContent = fmtDuration(service.uptime);
       refs.restarts.textContent = String(service.restarts);
       refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
@@ -764,7 +762,6 @@ def render_dashboard_shell():
         refs.cpu.set(0, '%', true);
         refs.mem.set(0, '%', true);
         refs.requests.set(null, '', true);
-        refs.sampled.textContent = '—';
         refs.msgBox.value = 'no messages in the last 30s';
       });
       // All agents' output for every VM, newest last, in one textbox.

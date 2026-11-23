@@ -20,8 +20,9 @@ python3 3_langgraph_workflow/workflow.py --self-check
 
 ## How the live demo works
 
-Each Flask call to `/` or `/health` generates two random 100×100 matrices and
-multiplies them before responding, so the HTTP ramp exercises guest CPU.
+Each call to `/` multiplies a random 1500×150 matrix by a random 150×150 matrix
+to exercise guest CPU, producing a 1500×150 result.
+`/health` is a lightweight process health check.
 
 ```text
 Load-generator pod ── GET / or /health ──► Flask service on a randomly selected VM
