@@ -316,6 +316,10 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
                 "status": run.get("status"),
                 "anomaly": run.get("anomaly", {}),
                 "root_cause": run.get("root_cause", {}),
+                "investigation": run.get("investigation", []),
+                "rca_findings": [f for f in run.get("findings", []) if f.startswith("[agent 2 ")],
+                "remedy_findings": [f for f in run.get("findings", []) if f.startswith("[agent 3 ")],
+                "remediation": run.get("remediation", {}),
                 "plan": run.get("remediation", {}).get("plan", []),
                 "result": run.get("remediation_result", {}),
                 "attempts": run.get("attempts", 0),
@@ -366,7 +370,7 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
 
 def render_dashboard_shell():
     """The dashboard page: a static shell that polls /api/dashboard and
-    renders cards with rotating dial gauges and progress bars in place, so
+    renders cards with rotating dial gauges and output panels in place, so
     needles sweep smoothly between updates instead of reloading."""
     return r"""<!DOCTYPE html>
 <html lang="en">
@@ -424,9 +428,6 @@ def render_dashboard_shell():
     .side-stats { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: .3rem .9rem; font-size: .84rem; }
     .side-stats .k { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; }
     .side-stats b { font-weight: 620; font-variant-numeric: tabular-nums; }
-    .bar { height: 8px; border-radius: 6px; background: var(--edge); overflow: hidden; }
-    .bar i { display: block; height: 100%; border-radius: 6px; background: var(--accent);
-             transition: width 1s ease, background .6s ease; }
     .kv { margin: .55rem 0 .15rem; }
     summary { cursor: pointer; }
     summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -435,8 +436,7 @@ def render_dashboard_shell():
     .row { display: flex; align-items: center; gap: .55rem; margin: .5rem 0; font-size: .84rem; }
     .row .tag { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; width: 5.2rem; flex: none; }
     .row .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .row .pill, .row .chip { max-width: 55%; overflow: hidden; }
-    .chip { font-size: .72rem; padding: .1rem .5rem; border-radius: 6px; background: rgba(56,189,248,.12); color: var(--accent); white-space: nowrap; }
+    .row .pill { max-width: 55%; overflow: hidden; }
     textarea.messages { width: 100%; resize: none; background: #0b1220; color: #9fb3c8;
             border: 1px solid var(--edge); border-radius: 8px; padding: .45rem .6rem;
             margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
@@ -577,12 +577,18 @@ def render_dashboard_shell():
       parent.appendChild(r);
       return r;
     }
-    function bar(parent) {
-      const b = el('div', 'bar');
-      const fill = el('i');
-      b.appendChild(fill);
-      parent.appendChild(b);
-      return fill;
+
+    function outputPanel(parent, title, service, rows = 5) {
+      const panel = el('details', 'kv');
+      const label = el('summary', 'label', title);
+      const box = document.createElement('textarea');
+      box.className = 'messages';
+      box.readOnly = true;
+      box.rows = rows;
+      box.setAttribute('aria-label', title + ' for ' + service);
+      panel.appendChild(label); panel.appendChild(box);
+      parent.appendChild(panel);
+      return { label, box };
     }
 
     function makeCard(svc) {
@@ -617,46 +623,20 @@ def render_dashboard_shell():
       const anomalyPill = pill('muted', 'no run yet');
       const anomalyText = el('span', 'text', '');
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-      const modelWrap = el('details', 'kv');
-      const modelLabel = el('summary', 'label', 'Latest anomaly detector LLM output');
-      const modelBox = document.createElement('textarea');
-      modelBox.className = 'messages';
-      modelBox.readOnly = true;
-      modelBox.rows = 5;
-      modelBox.setAttribute('aria-label', 'Latest anomaly detector LLM output for ' + svc.name);
-      modelWrap.appendChild(modelLabel); modelWrap.appendChild(modelBox);
-      root.appendChild(modelWrap);
+      const model = outputPanel(root, 'Latest anomaly detector LLM output', svc.name);
 
-      const rcaRow = row(root, 'rca');
-      const rcaWrap = el('div', 'text');
-      const rcaText = el('div', 'text', '');
-      const rcaFill = bar(rcaWrap);
-      rcaRow.appendChild(rcaText); rcaRow.appendChild(rcaWrap);
+      const rca = outputPanel(root, 'Root cause analysis output', svc.name);
 
-      const remRow = row(root, 'remedy');
-      const remWrap = el('div', 'text');
-      const remText = el('div', 'text', '');
-      const remFill = bar(remWrap);
-      const edaChip = el('span', 'chip', 'EDA: -');
-      remRow.appendChild(remText); remRow.appendChild(remWrap); remRow.appendChild(edaChip);
+      const remedy = outputPanel(root, 'Remediation plan and result', svc.name);
 
-      const msgWrap = el('details', 'kv');
-      msgWrap.appendChild(el('summary', 'label', 'last 30s messages'));
-      const msgBox = document.createElement('textarea');
-      msgBox.className = 'messages';
-      msgBox.readOnly = true;
-      msgBox.setAttribute('aria-label', 'Recent telemetry messages for ' + svc.name);
-      msgBox.setAttribute('rows', '6');
-      msgWrap.appendChild(msgBox);
-      root.appendChild(msgWrap);
+      const messages = outputPanel(root, 'last 30s messages', svc.name, 6);
 
       cardsRoot.appendChild(root);
       return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
                restarts: restarts, signals: signals, fault: fault,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
-               rcaText: rcaText, rcaFill: rcaFill,
-               remText: remText, remFill: remFill, edaChip: edaChip,
-               msgBox: msgBox, modelBox: modelBox, modelLabel: modelLabel };
+               msgBox: messages.box, modelBox: model.box, modelLabel: model.label,
+               rcaBox: rca.box, remedyBox: remedy.box };
     }
 
     function setPill(node, cls, text, withDot) {
@@ -704,12 +684,21 @@ def render_dashboard_shell():
       refs.msgBox.scrollTop = refs.msgBox.scrollHeight;
 
       const run = svc.run;
+      const waiting = run && run.status === 'running' ? 'Workflow in progress. ' : '';
+      const rc = (run && run.root_cause) || {};
+      const investigation = (run && run.investigation) || [];
+      const remediation = (run && run.remediation) || {};
+      const result = (run && run.result) || {};
+      refs.rcaBox.value = Object.keys(rc).length || investigation.length || run?.rca_findings?.length
+        ? JSON.stringify({root_cause: rc, investigation, findings: run.rca_findings}, null, 2)
+        : waiting + 'No root cause recorded.';
+      refs.remedyBox.value = Object.keys(remediation).length || Object.keys(result).length || run?.remedy_findings?.length
+        ? JSON.stringify({status: run.status, attempts: run.attempts, max_attempts: run.max_attempts,
+                          remediation, result, findings: run.remedy_findings}, null, 2)
+        : waiting + 'No remediation plan or execution result recorded.';
       if (!run) {
         setPill(refs.anomalyPill, 'ok', 'not detected', false);
         refs.anomalyText.textContent = '';
-        refs.rcaText.textContent = ''; refs.rcaFill.style.width = '0%';
-        refs.remText.textContent = ''; refs.remFill.style.width = '0%';
-        refs.edaChip.textContent = 'EDA: -';
         return;
       }
       if (run.status === 'running') {
@@ -725,23 +714,6 @@ def render_dashboard_shell():
         setPill(refs.anomalyPill, 'ok', 'not detected', false);
         refs.anomalyText.textContent = run.status || '';
       }
-      const rc = run.root_cause || {};
-      const confMap = { high: 100, medium: 60, low: 25 };
-      const conf = confMap[rc.confidence] || 0;
-      refs.rcaText.textContent = (rc.component || '?') + ' — ' + (rc.summary || '');
-      refs.rcaFill.style.width = conf + '%';
-      refs.rcaFill.style.background = rc.confidence === 'high' ? 'var(--ok)' :
-        (rc.confidence === 'medium' ? 'var(--warn)' : 'var(--muted)');
-      const result = run.result || {};
-      const plan = run.plan || [];
-      const step = plan.length ? plan[0].tool + ' ' + ((plan[0].arguments || {}).module || '') : 'none';
-      const accepted = result.eda && result.eda.ok;
-      refs.remText.textContent = step + ' · ' + (accepted ? 'event accepted' : (result.ok ? 'executed ok' : (result.steps ? 'failed' : 'pending')));
-      const attemptPct = Math.min(100, (run.attempts / Math.max(1, run.max_attempts)) * 100);
-      refs.remFill.style.width = attemptPct + '%';
-      refs.remFill.style.background = result.ok ? 'var(--ok)' : 'var(--warn)';
-      const eda = (result.eda || {}).status || 'not configured';
-      refs.edaChip.textContent = 'EDA: ' + eda;
     }
 
     function update(data) {

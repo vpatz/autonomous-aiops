@@ -238,9 +238,9 @@ a red accent and a `vm down` badge even after a workflow-pod restart.
 When telemetry is not flowing, the host CPU/memory dials gray out at zero
 instead of showing stale values; while flowing, the card accent is green
 (with the age in the status pill). Each card has process uptime and
-restart counts, the workflow rows — anomaly badge, RCA summary with a
-confidence bar, and the recommended remediation with an attempts bar and
-its EDA delivery chip — and a text area showing the last 30 seconds of
+restart counts, an anomaly badge, collapsible RCA and remediation output
+boxes (diagnosis, tool calls, plan, execution results and EDA delivery),
+and a text area showing the last 30 seconds of
 messages received from that VM. The page polls `/api/dashboard` every 2
 seconds and updates the cards in place, and a textbox at the bottom shows
 the output of all agents across every VM (newest last); `/api/dashboard`

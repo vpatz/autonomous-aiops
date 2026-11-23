@@ -68,7 +68,7 @@ Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/
    echo "https://$(oc -n my-vm-project get route aiops-workflow -o jsonpath='{.spec.host}')"
    ```
 
-   Each VM card refreshes every two seconds. Watch the CPU, memory, and concurrent-request dials, the recent guest messages, and the anomaly, RCA, and remediation rows. **Latest anomaly detector LLM output** shows the JSON verdict, UTC timestamp, and whether it came from detection or post-action verification. A healthy `{"detected":false}` verdict is distinct from an unavailable model. The dashboard data is also available at `/api/dashboard`.
+   Each VM card refreshes every two seconds. Watch the CPU, memory, and concurrent-request dials and expand the RCA and remediation text boxes for tool outputs, findings, and recovery results. **Latest anomaly detector LLM output** shows the JSON verdict, UTC timestamp, and whether it came from detection or post-action verification. A healthy `{"detected":false}` verdict is distinct from an unavailable model. The dashboard data is also available at `/api/dashboard`.
 
 5. **Exercise a failure.** Once the VM is reporting telemetry, try a targeted scenario:
 
