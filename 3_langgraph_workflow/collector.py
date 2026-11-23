@@ -222,6 +222,28 @@ class TelemetryStore:
                                   "otlp": MessageToDict(resource)}
                 for i, (at, _, signal, resource) in enumerate(sorted(records, key=lambda r: r[0]))}
 
+    def peak_requests(self, service, seconds=10):
+        """Peak overlap of HTTP server spans received recently for this VM."""
+        cutoff = time.monotonic() - seconds
+        with self._lock:
+            batches = [res for sec, bucket in self._exports.items() if sec >= int(cutoff)
+                       for at, vm, kind, res in bucket
+                       if vm == service and kind == "traces" and at >= cutoff]
+        edges = []
+        for batch in batches:
+            for scope in batch.scope_spans:
+                for span in scope.spans:
+                    if (span.kind == span.SPAN_KIND_SERVER
+                            and 0 < span.start_time_unix_nano < span.end_time_unix_nano
+                            and any(a.key in ("http.method", "http.request.method") for a in span.attributes)):
+                        edges.extend(((span.start_time_unix_nano, 1), (span.end_time_unix_nano, -1)))
+        # Treat intervals as [start, end): an end sorts before a simultaneous start.
+        active = peak = 0
+        for _, delta in sorted(edges):
+            active += delta
+            peak = max(peak, active)
+        return peak
+
     def _entry(self, service_name):
         if service_name not in self._services:
             self._services[service_name] = {

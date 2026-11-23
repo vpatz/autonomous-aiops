@@ -3,6 +3,8 @@
 GET /        page with a timer that starts when the page loads
 GET /health  whether this process is serving requests
 
+Both endpoints multiply two freshly generated 50x50 matrices per request.
+
 Metrics, logs and traces are pushed over OTLP/HTTP to
 OTEL_EXPORTER_OTLP_ENDPOINT (default http://192.168.64.1:4318) every
 OTEL_METRIC_EXPORT_INTERVAL ms. Host CPU and memory load are
@@ -16,7 +18,9 @@ remediated by the multi-agent workflow.
 
 import atexit
 import logging
+import operator
 import os
+import random
 import socket
 import time
 from datetime import datetime, timezone
@@ -96,6 +100,14 @@ active_requests.add(0)  # Report idle even before the first request.
 def count_request_start():
     active_requests.add(1)
     request.environ["aiops.request_counted"] = True
+
+
+def _matrix_workload():
+    size = 50
+    left = [[random.random() for _ in range(size)] for _ in range(size)]
+    right = [[random.random() for _ in range(size)] for _ in range(size)]
+    columns = list(zip(*right))
+    return [[sum(map(operator.mul, row, col)) for col in columns] for row in left]
 
 
 @app.teardown_request
@@ -258,12 +270,14 @@ def _health_payload():
 
 @app.get("/")
 def workload():
+    _matrix_workload()
     page_loads.add(1)
     return render_template_string(PAGE, hostname=socket.gethostname())
 
 
 @app.get("/health")
 def health():
+    _matrix_workload()
     payload = _health_payload()
     code = 200 if payload["status"] == "ok" else 503
     health_checks.add(1, {"status": payload["status"]})

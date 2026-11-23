@@ -86,14 +86,17 @@ If the RHEL image isn't ready, inspect `dataimportcron/rhel10-image-cron` and
 access and the storage profile before creating VMs. Complete AAP's first login
 and subscription setup on the **new** `aap` Route.
 
-For tracing, let ODH initialize `default-dsci` with applications namespace
-`opendatahub`. Check cert-manager and the ODH data-science gateway before
-deploying MLflow. On a fresh cluster create the demo DSC below. If there is
-already a DSC, enable `dashboard.standard` and `mlflowoperator` on that instance
-instead of replacing its other components.
+For tracing on a fresh cluster, explicitly create `default-dsci` after the
+ODH operator's CSV succeeds: ODH 3.6 can have automatic DSCI creation
+disabled. Wait for initialization before enabling the MLflow operator, then
+wait for that operator before creating the MLflow instance. If a DSCI already
+exists, reuse it after checking its applications namespace is `opendatahub`.
+If a DSC already exists, enable `dashboard.standard` and `mlflowoperator` on
+that instance instead of replacing its other components.
 
 ```sh
-oc get certmanagers.operator.openshift.io,dsci,gatewayconfigs
+oc apply -f 0_cluster_setup/dscinitialization.yaml
+oc wait dsci/default-dsci --for=jsonpath='{.status.phase}'=Ready --timeout=15m
 oc apply -f 0_cluster_setup/datasciencecluster.yaml
 oc wait --for=condition=MLflowOperatorReady dsc/default-dsc --timeout=15m
 oc apply -f 0_cluster_setup/mlflow.yaml

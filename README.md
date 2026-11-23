@@ -20,6 +20,9 @@ python3 3_langgraph_workflow/workflow.py --self-check
 
 ## How the live demo works
 
+Each Flask call to `/` or `/health` generates two random 50×50 matrices and
+multiplies them before responding, so the HTTP ramp exercises guest CPU.
+
 ```text
 Load-generator pod ── GET / or /health ──► Flask service on a randomly selected VM
         │                                         │
@@ -46,6 +49,8 @@ Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/
 
 1. **Prepare the cluster and VMs.** Follow the [cluster setup guide](0_cluster_setup/README.md#3-recreate-credentials-and-deploy-the-demo) to create `my-vm-project`, provision the `linux-mcp-ssh` Secret, and deploy a private copy of `1_vm_services/vm-deploy.yaml` with the matching SSH public key and VM console password. This creates `rhel10-service-1` through `rhel10-service-4` and `linux-mcp`.
 2. **Configure integrations.** For model-assisted detection and investigation, configure the optional [`llm-config` Secret](3_langgraph_workflow/README.md#integrating-an-llm). For real recovery, configure the [AAP event stream, controller templates, rulebook activation, and `eda-config` Secret](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible).
+
+   **When changing clusters:** find the current AAP gateway with `oc -n aap get route aap -o jsonpath='{.spec.host}'`. In that gateway's Automation Decisions UI, copy the new event stream's **full HTTPS POST URL** into `EDA_EVENT_URL` in your private `~/.config/aiops/eda.env`. The stream path is cluster-specific too; replacing only the hostname is not enough. Set the matching Basic-auth credentials, update `eda-config` in `my-vm-project`, and recreate the workflow pod to reload it. In the EDA launcher's AAP credential, set the **controller** URL to `https://<current-gateway-host>/api/controller/`.
 3. **Deploy the workflow and traffic generator** from the repo root:
 
    ```sh

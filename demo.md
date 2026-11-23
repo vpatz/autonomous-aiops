@@ -26,7 +26,7 @@ Wait for `rhel10-service-1` and `rhel10-service-2` to show **flowing**, successf
 
 Point out three different measurements:
 
-- The generator ramps from **1 to 500 requests/s across all VMs**, holds for 10 seconds, and repeats. The concurrent-request dial instead shows how many requests were **in flight on that VM at collection time**.
+- The generator ramps from **1 to 500 requests/s across all VMs**, holds for 10 seconds, and repeats. The concurrent-request dial shows the peak overlap of HTTP server spans received from that VM in the last 10 seconds. **In flight at export** shows the instantaneous metric, which can be zero even under load.
 - Every five seconds the generator sends per-VM, per-second HTTP outcomes. A `200` is a completed response; `no_response` means no HTTP status came back. Neither is a guest heartbeat.
 - **Latest anomaly detector LLM output** is the model's verdict. `{"detected":false}` means it found no *additional* anomaly; deterministic rules can still trigger RCA.
 
