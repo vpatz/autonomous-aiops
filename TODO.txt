@@ -1,0 +1,25 @@
+Pending - Stage-1 
+-----------------
+1. Deploy on a new cluster
+2. Run tests for chaos injection on VM/service and see ML flow traces
+    - Single 
+    - Concurrent 
+3. Check agent traces for single and Concurrent defects
+
+Pending - Stage-2 
+-----------------
+4. Crate a load generator pod (also acts like a dummy load balancer)
+    - Can vary load concurrency
+    - Rampup from min to max and loop
+5. -- DROP -- Create a load banlancer serice runing on VM 
+    - routes requests from load generator in round robin strategy
+4. Modify services to provide end point that loag generator can call
+5. -- Drop -- Create a round robin load balancer service
+6. -- Drop -- Modify services running in VMs into frontend and backend services
+    - Frontend calls backend services (dependency)
+7. -- Drop -- Establish dependencies
+    - Load generator --> Load balancer (VM5) -->
+        VM1 --> VM2 or 
+        VM3 --> VM4 
+8. Create more complex chaos scenarios
+9. Test on cluster and show inner loop working
