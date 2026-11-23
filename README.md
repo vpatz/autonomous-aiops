@@ -20,7 +20,7 @@ python3 3_langgraph_workflow/workflow.py --self-check
 
 ## How the live demo works
 
-Each call to `/` multiplies two random 100×100 matrices to exercise guest CPU.
+Each call to `/` multiplies two random 75×75 matrices to exercise guest CPU.
 `/health` is a lightweight process health check.
 
 ```text
