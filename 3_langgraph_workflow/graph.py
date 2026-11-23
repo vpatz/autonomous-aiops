@@ -38,7 +38,7 @@ def build_graph(
     silence_seconds=state.DEFAULT_SILENCE_SECONDS,
     verify_wait_seconds=state.DEFAULT_VERIFY_WAIT_SECONDS,
     deliver=None,
-    is_vm_halted=None,
+    get_vm_power_state=None,
     get_evidence=None,
     on_model_result=None,
     on_progress=None,
@@ -52,7 +52,7 @@ def build_graph(
         silence_seconds=silence_seconds, use_llm=use_llm, get_evidence=get_evidence,
         on_model_result=on_model_result))
     graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-        linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress,
+        linux_mcp=linux_mcp, use_llm=use_llm, get_vm_power_state=get_vm_power_state, on_progress=on_progress,
         get_window=get_window, silence_seconds=silence_seconds))
     graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
         ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None, on_progress=on_progress))

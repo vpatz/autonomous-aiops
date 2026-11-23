@@ -84,7 +84,8 @@ metadata:
 rules:
   - apiGroups: ["kubevirt.io"]
     resources: ["virtualmachines"]
-    verbs: ["get", "list"]
+    resourceNames: ["rhel10-service-1", "rhel10-service-2", "rhel10-service-3", "rhel10-service-4"]
+    verbs: ["get"]
   - apiGroups: ["mlflow.kubeflow.org"]
     resources: ["experiments"]
     verbs: ["get", "list", "create", "update"]

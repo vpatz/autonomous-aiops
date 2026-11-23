@@ -131,8 +131,13 @@ from telemetry verification. Check the activation's event history and the
 controller job history to confirm the rulebook ran the job.
 
 The same activation also handles `action: restart_vm`. For silent telemetry the
-RCA checks the named demo VM's current KubeVirt spec. Only `running: false`
-or `runStrategy: Halted` selects VM recovery. The workflow allows four minutes
+RCA first calls Linux MCP's `get_system_information` if advertised. A matching
+guest hostname rules out a halted VM for that check. An unavailable or
+inconclusive guest probe leads to the workflow's read-only `get_vm_power_state`
+tool, which reads the named KubeVirt object. Only a response naming the target,
+reporting `Stopped`, and confirming `running: false` or `runStrategy: Halted`
+selects VM recovery. Probe calls and their responses appear in the RCA history
+and count against its iteration budget. The workflow allows four minutes
 for fresh telemetry after dispatch. In this demo an intentional shutdown of
 an observed demo VM is therefore treated as a fault while the workflow is active.
 
@@ -261,11 +266,9 @@ it retries the same snapshot once with 8,192 tokens. Other failures go directly
 to the rule fallback, with the reason shown on the VM card.
 
 The dashboard at `/` is a card-based view built **only from telemetry and
-workflow state** for its content. Cards flow two per row and are never
-removed when a VM goes down — the cluster's KubeVirt VM inventory (the
-pod's service account can list VMs) is merged in only to decide which
-cards exist and whether a VM is stopped, so a down VM keeps its card with
-a red accent and a `vm down` badge even after a workflow-pod restart.
+workflow state**. VM status is `flowing`, `silent`, or `no telemetry yet`,
+based solely on guest telemetry. Configured `DASHBOARD_VMS` keep their cards
+even after a workflow-pod restart. Silence does not establish VM power state.
 When telemetry is not flowing, the host CPU/memory dials gray out at zero
 instead of showing stale values; while flowing, the card accent is green
 (with the age in the status pill). Each card has process uptime and

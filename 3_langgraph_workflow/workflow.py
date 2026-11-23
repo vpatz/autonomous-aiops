@@ -52,8 +52,6 @@ import state
 STEP = "aiops workflow"
 DASHBOARD_MESSAGE_SECONDS = 30
 SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
-VM_INVENTORY_SECONDS = 15
-_inventory = {"at": 0.0, "vms": {}}
 
 
 def _namespace():
@@ -64,9 +62,9 @@ def _namespace():
         return os.environ.get("POD_NAMESPACE", "my-vm-project")
 
 
-def _kube_vm_items(namespace):
-    """List KubeVirt VM objects: in-cluster through the service account,
-    locally through `oc get -o json`."""
+def _kube_vm(namespace, name):
+    """Read one named VM for the RCA power-state tool."""
+    from urllib.parse import quote
     if os.path.isdir(SERVICE_ACCOUNT_DIR):
         import ssl
         import urllib.request
@@ -74,46 +72,23 @@ def _kube_vm_items(namespace):
         with open(os.path.join(SERVICE_ACCOUNT_DIR, "token"), encoding="utf-8") as handle:
             token = handle.read().strip()
         url = (f"https://kubernetes.default.svc/apis/kubevirt.io/v1/"
-               f"namespaces/{namespace}/virtualmachines")
+               f"namespaces/{quote(namespace, safe='')}/virtualmachines/{quote(name, safe='')}")
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         context = ssl.create_default_context(
             cafile=os.path.join(SERVICE_ACCOUNT_DIR, "ca.crt"))
         with urllib.request.urlopen(request, timeout=5, context=context) as response:
-            return json.loads(response.read().decode()).get("items", [])
+            return json.load(response)
     import subprocess
 
-    result = subprocess.run(
-        ["oc", "get", "vm", "-n", namespace, "-o", "json"],
-        capture_output=True, text=True, timeout=10)
+    try:
+        result = subprocess.run(
+            ["oc", "get", "vm", name, "-n", namespace, "-o", "json"],
+            capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("VM power-state lookup timed out") from exc
     if result.returncode != 0:
         raise OSError(result.stderr.strip()[:200])
-    return json.loads(result.stdout).get("items", [])
-
-
-def vm_inventory(namespace=None, refresh_seconds=VM_INVENTORY_SECONDS):
-    """{vm_name: {"running": bool}} for the demo VMs.
-
-    Used only so a VM keeps its dashboard card (red) while it is down: a
-    stopped VM sends no telemetry, and the in-memory store forgets it when
-    the workflow pod restarts. Dashboard content stays telemetry-derived;
-    this is just the VM identity list from the cluster. Errors keep the
-    last known inventory (and an empty one degrades to telemetry-only)."""
-    now = time.monotonic()
-    if _inventory["at"] and now - _inventory["at"] < refresh_seconds:
-        return _inventory["vms"]
-    try:
-        items = _kube_vm_items(namespace or _namespace())
-    except (OSError, ValueError):
-        return _inventory["vms"]
-    vms = {}
-    for item in items:
-        name = item.get("metadata", {}).get("name", "")
-        if not name:
-            continue
-        spec = item.get("spec", {})
-        vms[name] = {"running": spec.get("running", spec.get("runStrategy") != "Halted")}
-    _inventory.update({"at": now, "vms": vms})
-    return _inventory["vms"]
+    return json.loads(result.stdout)
 
 
 def build_deps(args, store=None, on_progress=None):
@@ -144,7 +119,7 @@ def build_deps(args, store=None, on_progress=None):
         silence_seconds=args.silence_seconds,
         verify_wait_seconds=args.verify_wait_seconds,
         deliver=deliver,
-        is_vm_halted=confirmed_halted if deliver else None,
+        get_vm_power_state=get_vm_power_state if deliver else None,
         get_evidence=store.recent_evidence if store is not None else None,
         on_model_result=WorkflowHandler.record_model_result,
         on_progress=on_progress,
@@ -152,19 +127,16 @@ def build_deps(args, store=None, on_progress=None):
     return app, linux, ansible
 
 
-def confirmed_halted(name):
-    """Check fresh KubeVirt desired power state; an SSH timeout is not evidence."""
+def get_vm_power_state(name):
+    """Read-only infrastructure tool. Only report halted after shutdown completes."""
     if name not in os.environ.get("DASHBOARD_VMS", "").split():
-        return False
-    try:
-        items = _kube_vm_items(_namespace())
-    except (OSError, ValueError, TimeoutError):
-        return False
-    for item in items:
-        if item["metadata"]["name"] == name and not item["metadata"].get("deletionTimestamp"):
-            spec = item["spec"]
-            return spec.get("running") is False or spec.get("runStrategy") == "Halted"
-    return False
+        raise ValueError("VM outside demo inventory")
+    item = _kube_vm(_namespace(), name)
+    meta, spec = item["metadata"], item["spec"]
+    if meta["name"] != name or meta.get("deletionTimestamp"):
+        raise ValueError("VM identity changed or deletion in progress")
+    return {"vm": name, "status": item.get("status", {}).get("printableStatus", "Unknown"),
+            "configured_to_stop": spec.get("running") is False or spec.get("runStrategy") == "Halted"}
 
 
 def close_clients(*clients):
@@ -328,28 +300,21 @@ class WorkflowHandler(collector.CollectorHandler):
         super().do_GET()
 
 
-def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
-    """Everything the dashboard renders, as JSON-safe data. Built only from
-    telemetry windows and workflow run state — plus the VM inventory, which
-    only decides which cards exist and whether a VM is down."""
+def dashboard_data(store, runs, runs_lock, model_results=None):
+    """Render local telemetry and run state; guest telemetry alone determines VM status."""
     with runs_lock:
         runs_snapshot = dict(runs)
         results_snapshot = dict(model_results or {})
-    if inventory is None:
-        inventory = vm_inventory()
 
     window_seconds = 600
     services = []
     expected = os.environ.get("DASHBOARD_VMS", "").split()
-    for name in sorted(set(expected) | set(store.services()) | set(runs_snapshot) | set(inventory)):
+    for name in sorted(set(expected) | set(store.services()) | set(runs_snapshot)):
         window = store.window(name, window_seconds)
         metrics = window.get("metrics", {})
         events = window.get("metric_events", [])
         last_seen = window.get("last_seen_seconds_ago")
-        vm_state = inventory.get(name)
-        if vm_state is not None and not vm_state.get("running", True):
-            vm_status = "down"
-        elif not window.get("ever_seen"):
+        if not window.get("ever_seen"):
             vm_status = "none"
         elif last_seen is not None and last_seen <= state.DEFAULT_SILENCE_SECONDS:
             vm_status = "flowing"
@@ -461,7 +426,6 @@ def render_dashboard_shell():
             display: flex; flex-direction: column; }
     .card.vm-flowing { border-left-color: var(--ok); }
     .card.vm-silent { border-left-color: var(--bad); }
-    .card.vm-down { border-left-color: var(--bad); }
     .card.vm-none { border-left-color: var(--bad); }
     .dial.offline { filter: grayscale(1); }
     @keyframes cardIn { from { opacity: 0; transform: translateY(12px); }
@@ -765,8 +729,6 @@ def render_dashboard_shell():
         setPill(refs.status, 'ok', 'flowing · ' + Math.round(vm.last_seen_seconds_ago) + 's ago', true);
       } else if (vm.status === 'silent') {
         setPill(refs.status, 'bad', 'silent · ' + Math.round(vm.last_seen_seconds_ago) + 's', true);
-      } else if (vm.status === 'down') {
-        setPill(refs.status, 'bad', 'vm down', true);
       } else {
         setPill(refs.status, 'bad', 'no telemetry yet', false);
       }
@@ -1028,13 +990,13 @@ def self_check():
                                        get_evidence=history.recent_evidence,
                                        on_model_result=WorkflowHandler.record_model_result)
         # The dashboard exposes the incident summary even before RCA finishes.
-        preview = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+        preview = dashboard_data(history, {}, WorkflowHandler.runs_lock,
                                  model_results=WorkflowHandler.model_results)
         card = next(c for c in preview["services"] if c["name"] == "vm-1")
         assert card["run"] is None and card["detector_llm"]["verdict"]["summary"] == "Error logs were received."
         WorkflowHandler.record_model_result("vm-1", True, {
             "source": "rules", "severity": "low", "summary": "CPU exceeded\n80%."}, "model unavailable")
-        updated = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+        updated = dashboard_data(history, {}, WorkflowHandler.runs_lock,
                                  model_results=WorkflowHandler.model_results)
         lines = next(c for c in updated["services"] if c["name"] == "vm-1")["incident_lines"]
         assert lines[:-1] == card["incident_lines"] and lines[0].startswith("[")
@@ -1042,7 +1004,7 @@ def self_check():
         prev = WorkflowHandler.model_results["vm-1"][-1]
         WorkflowHandler.append_incident("vm-1", "window · cooldown", prev["verdict"])
         assert WorkflowHandler.revision == revision + 1
-        refreshed = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+        refreshed = dashboard_data(history, {}, WorkflowHandler.runs_lock,
                                    model_results=WorkflowHandler.model_results)
         refreshed_card = next(c for c in refreshed["services"] if c["name"] == "vm-1")
         assert refreshed_card["incident_lines"][:-1] == lines and refreshed_card["detector_llm"] == prev
@@ -1079,8 +1041,12 @@ def self_check():
         "investigation": [{"iteration": 1, "tool": "get_service_status"}],
         "findings": ["[agent 1 anomaly detector] example"],
     })
-    data = dashboard_data(store, {"vm-1": run}, threading.Lock(),
-                          inventory={"vm-1": {"running": True}, "vm-2": {"running": False}})
+    with patch.dict(os.environ, {"DASHBOARD_VMS": "vm-1 vm-2"}), patch(
+            __name__ + "._kube_vm", side_effect=AssertionError("dashboard queried KubeVirt")):
+        data = dashboard_data(store, {"vm-1": run}, threading.Lock())
+        with patch.object(time, "monotonic", return_value=now + state.DEFAULT_SILENCE_SECONDS + 2):
+            quiet = dashboard_data(store, {}, threading.Lock())
+        assert {c["name"]: c["vm"]["status"] for c in quiet["services"]} == {"vm-1": "silent", "vm-2": "none"}
     by_name = {item["name"]: item for item in data["services"]}
     service = by_name["vm-1"]
     if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
@@ -1088,9 +1054,7 @@ def self_check():
     if (service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0
             or service["service"]["active_requests"] != 7):
         raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
-    # A VM the cluster reports as stopped keeps its card, marked down.
-    if "vm-2" not in by_name or by_name["vm-2"]["vm"]["status"] != "down":
-        raise SystemExit(f"{STEP}: stopped VM must keep a card with status down: {data['services']}")
+    assert by_name["vm-2"]["vm"]["status"] == "none"
     if not service["messages"] or not service["messages"][-1]["text"].startswith("metrics:"):
         raise SystemExit(f"{STEP}: dashboard data messages missing: {service.get('messages')}")
     if service["run"]["root_cause"]["component"] != "aiops-demo.service":
@@ -1103,7 +1067,7 @@ def self_check():
     shell = render_dashboard_shell()
     for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll",
                    "repeat(2, minmax(0, 1fr))", "cardIn", "animationDelay", "textarea",
-                   "messages", "not detected", "vm-flowing", "vm-silent", "vm-down",
+                   "messages", "not detected", "vm-flowing", "vm-silent", "vm-none",
                    "rcaBox", "remedyBox", "wrap.style.opacity"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
