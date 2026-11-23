@@ -344,7 +344,7 @@ def main():
     parser.add_argument("--requests", type=int, help="scheduled request slots (ignored with --duration)")
     parser.add_argument("--duration", type=float, default=None, help="run for N seconds instead of a fixed count")
     parser.add_argument("--rate", type=float, help="use fixed requests/second instead of the default 1 to 500 ramp")
-    parser.add_argument("--workers", type=int, default=32, help="concurrent workers (default: 32)")
+    parser.add_argument("--workers", type=int, default=128, help="concurrent workers (default: %(default)s)")
     parser.add_argument("--timeout", type=float, default=5.0, help="per-request timeout seconds")
     parser.add_argument("--seed", type=int, default=None, help="random seed for reproducible runs")
     parser.add_argument("--kubeconfig", default="", help="kubeconfig for oc")

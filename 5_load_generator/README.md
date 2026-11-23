@@ -31,7 +31,7 @@ the first second, then 6, 11, and so on up to 496. It holds 500 requests per
 second for 10 seconds, then starts again at 1. Requests are spread evenly
 within each second. Use `--duration 110` for one cycle or `--rate` for a fixed rate.
 
-The default pool has 32 workers. The ramp reports `skipped` slots if all
+The default pool has 128 workers across all target VMs. The ramp reports `skipped` slots if all
 workers are busy or a slot's deadline passes. For high rates, use direct HTTP
 (`--url` with a reachable service or port-forward); the default cluster
 transport opens an SSH connection for each request.
