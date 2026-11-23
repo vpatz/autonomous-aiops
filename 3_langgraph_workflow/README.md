@@ -241,7 +241,7 @@ instead of showing stale values; while flowing, the card accent is green
 restart counts, the workflow rows — anomaly badge, RCA summary with a
 confidence bar, and the recommended remediation with an attempts bar and
 its EDA delivery chip — and a text area showing the last 30 seconds of
-messages received from that VM. The page polls `/api/dashboard` every 5
+messages received from that VM. The page polls `/api/dashboard` every 2
 seconds and updates the cards in place, and a textbox at the bottom shows
 the output of all agents across every VM (newest last); `/api/dashboard`
 and `/runs` are plain JSON for scripting.

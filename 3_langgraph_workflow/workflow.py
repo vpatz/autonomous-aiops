@@ -462,7 +462,7 @@ def render_dashboard_shell():
   <script>
   (function () {
     'use strict';
-    const REFRESH_MS = 5000;
+    const REFRESH_MS = 2000;
     const cardsRoot = document.getElementById('cards');
     const statsEl = document.getElementById('stats');
     const agentOutput = document.getElementById('agentOutput');

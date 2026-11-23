@@ -79,7 +79,7 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   pod's service account (Role: `virtualmachines` get/list) purely to know which
   cards exist and whether a VM is stopped, so a down VM keeps its card (red,
   `vm down`) even after a pod restart; a failed listing degrades to
-  telemetry-only. The page polls `/api/dashboard` every 5s and renders per-VM
+  telemetry-only. The page polls `/api/dashboard` every 2s and renders per-VM
   cards (two per row, never removed) with rotating SVG dial gauges (host
   CPU/memory — grayed out at zero when telemetry is not flowing), restart counts
   from decreasing `service.uptime` samples, anomaly/RCA/remediation rows with
