@@ -28,7 +28,7 @@ Point out three different measurements:
 
 - The generator ramps from **1 to 500 requests/s across all VMs**, holds for 5 seconds, and repeats. The concurrent-request dial shows requests in flight on that VM at the latest two-second metric export. It can read zero when requests complete between samples.
 - Every two seconds the generator sends per-VM, per-second HTTP outcomes. A `200` is a completed response; `no_response` means no HTTP status came back. Neither is a guest heartbeat.
-- **Latest anomaly detector LLM output** is the model's verdict. `{"detected":false}` means it found no *additional* anomaly; deterministic rules can still trigger RCA.
+- **Latest rule-detected incident** shows the triggered rules and the incident summary. Healthy windows skip the LLM; the last incident remains available for inspection.
 
 ## 3. Inject two faults without telling the agents which is which
 

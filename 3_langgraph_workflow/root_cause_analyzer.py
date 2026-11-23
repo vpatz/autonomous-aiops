@@ -100,7 +100,8 @@ def _llm_next_action(service_name, anomaly, investigation, tools, iteration, max
     return llm.chat_json([{"role": "system", "content": prompt},
                           {"role": "user", "content": json.dumps(
                               {"anomaly": anomaly, "tools": tool_catalog, "investigation": history,
-                               "detector_evidence": evidence}, separators=(",", ":"))}])
+                               "detector_evidence": evidence}, separators=(",", ":"))}],
+                         service_name=service_name)
 
 
 def _conclude(investigation):
@@ -373,7 +374,7 @@ def self_check():
     saved_chat = llm.chat_json
     captured = {}
 
-    def fake_chat_json(messages):
+    def fake_chat_json(messages, service_name=None):
         captured["prompt"] = messages[0]["content"]
         captured["evidence"] = json.loads(messages[1]["content"])["detector_evidence"]
         return {"action": "conclude", "root_cause": {

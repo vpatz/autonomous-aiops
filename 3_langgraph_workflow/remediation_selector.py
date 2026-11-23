@@ -140,7 +140,7 @@ def _llm_plan(root_cause, tools, service_name):
         f"Root cause: {json.dumps(root_cause)[:800]}\n"
         f"Approved tools: {json.dumps(catalog)[:1500]}\n"
     )
-    return llm.chat_json([{"role": "user", "content": prompt}])
+    return llm.chat_json([{"role": "user", "content": prompt}], service_name=service_name)
 
 
 def _approved_names(ansible_mcp):
@@ -337,7 +337,7 @@ def self_check():
     # Unapproved tools must be rejected before execution.
     class BadLlm:
         @staticmethod
-        def chat_json(messages):
+        def chat_json(messages, service_name=None):
             return {"steps": [{"tool": "format_disk", "arguments": {}}], "rationale": "nope"}
 
     saved = llm.chat_json

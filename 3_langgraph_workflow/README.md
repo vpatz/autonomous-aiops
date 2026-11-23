@@ -190,21 +190,23 @@ oc apply -f 3_langgraph_workflow/workflow-pod.yaml
 
 What changes with the LLM on:
 
-- **anomaly detector** — the model checks observed VMs for incidents beyond
-  the built-in rules, even when no rule fires. Each live detector prompt includes
+Every poll checks the rules on each previously seen VM. Agent model calls
+share a start-time limit: at least 10 seconds between calls for the same
+VM and 5 seconds between starts across VMs.
+
+- **anomaly detector** — rules detect incidents; the model summarizes only
+  flagged windows. Each live summary prompt includes the rule facts and
   every OTLP metric, log and trace resource received from that VM in the last
   10 seconds, in receipt order, with timestamps, attributes and all data points
   preserved in protobuf JSON. `client_logs:*` entries in the same evidence map
   are observations **about** that VM from `aiops-load-generator`: each log body
   contains one second of HTTP status counts or `no_response` outcomes. The
-  detector can cite these alongside guest signals or flag a client-visible
-  failure on its own. Client observations never refresh guest liveness.
+  model can use these for context. Client observations never refresh guest liveness.
   Recovery checks further restrict this to exports
   received after the action. There is no record cap or prompt truncation: if
   the window exceeds the model's context limit, detection falls back to rules.
-  The rule engine still uses its configured workflow window. A positive
-  verdict must cite evidence keys from that window. The `llm-anomaly`
-  signal and explanation are recorded and routed to RCA.
+  The rule engine uses its configured workflow window and latest host gauges.
+  CPU and memory trigger independently at strictly greater than 50% utilization.
 - **root cause analyzer (inner loop)** — RCA receives the detector's exact
   per-VM evidence snapshot, including guest OTLP and load-generator outcomes.
   Evidence keys remain stable even if the collector's rolling window advances
@@ -225,9 +227,13 @@ The dashboard header and `--self-check` output show whether the LLM is
 configured, and the findings trail names the tool the model chose at each
 iteration.
 
-Each VM card shows the latest anomaly detector LLM verdict as JSON, labeled
+Each VM card shows the latest rule-detected incident summary as JSON, labeled
 with its UTC timestamp and whether it came from detection or verification.
-Healthy polls update this output even when no investigation starts.
+Healthy polls skip the LLM and preserve the last incident summary.
+The detector allows 4,096 completion tokens, including model reasoning. If the
+endpoint reports an output-length cutoff before a JSON verdict is available,
+it retries the same snapshot once with 8,192 tokens. Other failures go directly
+to the rule fallback, with the reason shown on the VM card.
 
 The dashboard at `/` is a card-based view built **only from telemetry and
 workflow state** for its content. Cards flow two per row and are never
@@ -262,7 +268,7 @@ Environment variables (all optional; heuristics apply without an LLM):
 | --- | --- |
 | `LLM_BASE_URL` | OpenAI-compatible endpoint, including `/v1` (vLLM, EnMaaS, ...) |
 | `LLM_API_KEY` | bearer token for the endpoint |
-| `LLM_MODEL` | optional override; defaults to `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` when an endpoint is configured |
+| `LLM_MODEL` | optional override; defaults to `rits/meta-models/Muse-Spark-Open-816B-A42B-NVFP4` when an endpoint is configured |
 | `LINUX_MCP_URL` / `LINUX_MCP_COMMAND` | RCA MCP server (HTTP URL or stdio command) |
 | `ANSIBLE_MCP_URL` / `ANSIBLE_MCP_COMMAND` | remediation MCP server |
 | `MCP_INSECURE_TLS` | `1` to skip TLS verification on MCP HTTP endpoints |
@@ -276,8 +282,8 @@ budget), `--cooldown-seconds`, `--verify-wait-seconds`.
 
 - **anomaly_detector** (agent 1): deterministic triggers over the telemetry
   window (silence, ERROR logs, failed spans, dummy-crash counter, CPU/memory
-  saturation). Model findings can add an anomaly but cannot clear a rule
-  trigger. An unavailable model or invalid response falls back to the rules.
+  load). The model cannot add or clear a trigger. An unavailable model or
+  invalid summary falls back to the rule explanation.
 - **root_cause_analyzer** (agent 2): the inner loop. With an LLM, each
   iteration chooses the next MCP tool call from the live `tools/list`
   result; without one, a deterministic playbook runs `systemctl status` and

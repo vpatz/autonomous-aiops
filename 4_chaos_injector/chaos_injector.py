@@ -59,7 +59,7 @@ DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
 ZEROS = {"service.uptime": 999.0, "service.cpu.load": 0.0, "service.memory.load": 0.0}
 SPIKE = {"service.uptime": 999.0, "service.cpu.load": 97.5, "service.memory.load": 88.0}
 
-# stress-host targets: just above the detector's 90% saturation threshold,
+# stress-host targets: above the detector's 50% utilization thresholds,
 # so real telemetry reliably raises cpu-saturation and memory-pressure.
 STRESS_CPU_DUTY = 0.92   # busy fraction per core per 1s cycle
 STRESS_MEMORY_FREE = 0.08  # fraction of MemTotal to leave available

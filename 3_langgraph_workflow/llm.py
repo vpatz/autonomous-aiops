@@ -6,7 +6,7 @@ OpenAI, and so on. Configure with:
 
     LLM_BASE_URL   e.g. https://enmaas.example.com/v1 (include /v1)
     LLM_API_KEY    bearer token (optional for local vLLM)
-    LLM_MODEL      optional override for the default DeepSeek V4.1 Flash model
+    LLM_MODEL      optional override for the default Muse Spark model
 
 Every agent falls back to deterministic heuristics when the LLM is not
 configured or a call fails, so the demo always runs.
@@ -24,15 +24,44 @@ import argparse
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 
 STEP = "llm client"
-DEFAULT_MODEL = "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+DEFAULT_MODEL = "rits/meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
+VM_CALL_INTERVAL = 10
+CALL_START_GAP = 5
+
+
+class CallPacer:
+    """Reserve start times against the actual clock; never lock during network I/O."""
+    def __init__(self, clock=time.monotonic, sleep=time.sleep):
+        self.clock, self.sleep = clock, sleep
+        self.lock = threading.Lock()
+        self.next_global = 0
+        self.next_vm = {}
+
+    def wait(self, vm):
+        with self.lock:
+            due = max(self.next_global, self.next_vm.get(vm, 0))
+            while (delay := due - self.clock()) > 0:
+                self.sleep(delay)
+            start = self.clock()
+            self.next_global = start + CALL_START_GAP
+            self.next_vm[vm] = start + VM_CALL_INTERVAL
+
+
+_pacer = CallPacer()
 
 
 class LlmError(Exception):
     pass
+
+
+class IncompleteReply(LlmError):
+    """The model ran out of output tokens before returning usable JSON."""
 
 
 def config():
@@ -67,25 +96,29 @@ def build_request(messages, tools=None, temperature=0.0, max_tokens=1024):
     )
 
 
-def chat(messages, tools=None, temperature=0.0, max_tokens=1024):
+def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=None):
     """One chat completion. Returns {"content": str, "tool_calls": list}."""
     if not available():
         raise LlmError("LLM not configured (set LLM_BASE_URL)")
     request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+    if service_name is not None:
+        _pacer.wait(service_name)
+        print(f"[llm client] {service_name} model call starting", flush=True)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             body = json.loads(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
-        raise LlmError(f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}") from exc
+        raise LlmError(f"model endpoint returned HTTP {exc.code}") from exc
     except OSError as exc:
-        raise LlmError(f"request failed: {exc}") from exc
+        raise LlmError(f"model connection failed ({type(exc).__name__})") from exc
     try:
         choice = body["choices"][0]["message"]
-    except (KeyError, IndexError) as exc:
-        raise LlmError(f"unexpected response shape: {json.dumps(body)[:200]}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LlmError("model endpoint returned no chat message") from exc
     return {
         "content": choice.get("content") or "",
         "tool_calls": choice.get("tool_calls") or [],
+        "finish_reason": body["choices"][0].get("finish_reason"),
     }
 
 
@@ -107,17 +140,28 @@ def _extract_json(text):
             return json.loads(stripped[start : end + 1])
         except ValueError:
             pass
-    raise LlmError(f"no JSON object in reply: {text[:200]}")
+    raise LlmError("model reply did not contain valid JSON")
 
 
-def chat_json(messages, temperature=0.0, max_tokens=1024):
+def chat_json(messages, temperature=0.0, max_tokens=1024, service_name=None):
     """Chat completion parsed as a JSON object (agents use JSON decisions)."""
-    reply = chat(messages, temperature=temperature, max_tokens=max_tokens)
-    return _extract_json(reply["content"])
+    reply = chat(messages, temperature=temperature, max_tokens=max_tokens, service_name=service_name)
+    try:
+        return _extract_json(reply["content"])
+    except LlmError as exc:
+        if reply.get("finish_reason") == "length":
+            raise IncompleteReply(f"model reached the {max_tokens}-token output limit before returning JSON") from exc
+        raise
 
 
 def self_check():
     import os
+
+    now = [0]
+    pacer = CallPacer(lambda: now[0], lambda delay: now.__setitem__(0, now[0] + delay))
+    for vm, expected in [("a", 0), ("b", 5), ("b", 15), ("c", 20), ("a", 25)]:
+        pacer.wait(vm)
+        assert now[0] == expected
 
     saved = {key: os.environ.get(key) for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")}
     os.environ["LLM_BASE_URL"] = "https://llm.example.com/v1"

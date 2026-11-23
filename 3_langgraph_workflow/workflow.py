@@ -235,15 +235,16 @@ class WorkflowHandler(collector.CollectorHandler):
 
     runs = {}  # service_name -> latest final state (or {"running": True})
     runs_lock = threading.Lock()
-    model_results = {}  # latest detector call per VM, including healthy polls
+    model_results = {}  # latest flagged incident per VM; healthy polls leave this intact
 
     @classmethod
-    def record_model_result(cls, service, verifying, verdict):
+    def record_model_result(cls, service, verifying, verdict, failure=None):
         with cls.runs_lock:
             cls.model_results[service] = {
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "phase": "verification" if verifying else "detection",
                 "verdict": verdict,
+                "failure": failure,
             }
 
     def do_GET(self):
@@ -623,7 +624,7 @@ def render_dashboard_shell():
       const anomalyPill = pill('muted', 'no run yet');
       const anomalyText = el('span', 'text', '');
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-      const model = outputPanel(root, 'Latest anomaly detector LLM output', svc.name);
+      const model = outputPanel(root, 'Latest rule-detected incident', svc.name);
 
       const rca = outputPanel(root, 'Root cause analysis output', svc.name);
 
@@ -645,13 +646,13 @@ def render_dashboard_shell():
       if (withDot) { node.prepend(el('span', 'dot')); }
     }
 
-    function updateCard(svc, refs, llmEnabled) {
+    function updateCard(svc, refs) {
       const vm = svc.vm, service = svc.service;
       const call = svc.detector_llm;
-      refs.modelLabel.textContent = 'Latest anomaly detector LLM output' +
+      refs.modelLabel.textContent = 'Latest rule-detected incident' +
         (call ? ' · ' + call.phase + ' · ' + call.at : '');
-      refs.modelBox.value = call ? (call.verdict === null ? 'No valid model response; used rules.'
-        : JSON.stringify(call.verdict, null, 2)) : (llmEnabled ? 'Awaiting first response.' : 'LLM not configured.');
+      refs.modelBox.value = call ? JSON.stringify(call.failure ? {...call.verdict, model_error: call.failure}
+        : call.verdict, null, 2) : 'No rule-detected incident reported.';
       // VM status is color-coded on the card itself; cards are never
       // removed for a down VM, so the last known state stays visible.
       refs.root.className = 'card vm-' + vm.status;
@@ -727,7 +728,7 @@ def render_dashboard_shell():
       data.services.forEach(function (svc) {
         let refs = cards.get(svc.name);
         if (!refs) { refs = makeCard(svc); cards.set(svc.name, refs); }
-        updateCard(svc, refs, data.meta.llm);
+        updateCard(svc, refs);
       });
       const reported = new Set(data.services.map(svc => svc.name));
       cards.forEach(function (refs, name) {
@@ -780,20 +781,15 @@ def serve_forever(args):
     running = set()
     finished_at = {}
 
-    def run_for_service(service_name):
-        incident = False
+    def run_for_service(service_name, telemetry, trigger):
         try:
-            telemetry = store.window(service_name, args.window_seconds)
             snapshot = {}
-            anomaly = anomaly_detector.detect_window(service_name, telemetry, args.silence_seconds,
-                                                      get_evidence=store.recent_evidence,
-                                                      on_model_result=WorkflowHandler.record_model_result,
-                                                      evidence_snapshot=snapshot)
-            if not anomaly["detected"]:
-                return
-            incident = True
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = {"running": True}
+            anomaly = anomaly_detector.summarize_incident(
+                service_name, telemetry, trigger, args.silence_seconds,
+                get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
+                evidence_snapshot=snapshot)
             app, linux, ansible = build_deps(args, store=store)
             workflow_state = state.initial_state(
                 service_name,
@@ -813,8 +809,7 @@ def serve_forever(args):
             with WorkflowHandler.runs_lock:
                 WorkflowHandler.runs[service_name] = {"running": False, "status": "error", "error": str(exc)}
         finally:
-            if incident:
-                finished_at[service_name] = time.monotonic()
+            finished_at[service_name] = time.monotonic()
             running.discard(service_name)
 
     print(f"{STEP}: poller started (window={args.window_seconds}s silence={args.silence_seconds}s "
@@ -822,15 +817,20 @@ def serve_forever(args):
     try:
         while True:
             time.sleep(args.poll_seconds)
+            now = time.monotonic()
             for service_name in store.services():
+                telemetry = store.window(service_name, args.window_seconds)
+                trigger = anomaly_detector.analyze_window(telemetry, args.silence_seconds)
+                if not trigger["detected"]:
+                    continue
                 if service_name in running:
                     continue
-                if time.monotonic() - finished_at.get(service_name, 0) < args.cooldown_seconds:
+                if now - finished_at.get(service_name, -float("inf")) < args.cooldown_seconds:
                     continue
                 # Model latency on one VM must not stall checks on other VMs.
                 running.add(service_name)
                 threading.Thread(
-                    target=run_for_service, args=(service_name,), daemon=True,
+                    target=run_for_service, args=(service_name, telemetry, trigger), daemon=True,
                     name=f"run-{service_name}",
                 ).start()
     except KeyboardInterrupt:
@@ -916,15 +916,15 @@ def self_check():
     history.record_traces(collector.parse_traces(collector.sample_traces_payload("vm-1"),
                           received_at=now-1, retain=history.retain_export))
     with patch.object(llm, "available", return_value=True), patch.object(
-            llm, "chat_json", return_value={"detected": False}) as chat:
+            llm, "chat_json", return_value={"summary": "Error logs were received."}) as chat:
         anomaly_detector.detect_window("vm-1", history.window("vm-1", 120), 10,
                                        get_evidence=history.recent_evidence,
                                        on_model_result=WorkflowHandler.record_model_result)
-        # Healthy polls have no workflow run but must still expose the model's own output.
+        # The dashboard exposes the incident summary even before RCA finishes.
         preview = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
                                  model_results=WorkflowHandler.model_results)
         card = next(c for c in preview["services"] if c["name"] == "vm-1")
-        assert card["run"] is None and card["detector_llm"]["verdict"] == {"detected": False}
+        assert card["run"] is None and card["detector_llm"]["verdict"]["summary"] == "Error logs were received."
         payload = json.loads(chat.call_args.args[0][1]["content"])
         assert payload["lookback_seconds"] == 10
         evidence = payload["evidence"]
