@@ -248,8 +248,7 @@ restart counts, an anomaly badge, collapsible RCA and remediation output
 boxes (diagnosis, tool calls, plan, execution results and EDA delivery),
 and a text area showing the last 30 seconds of
 messages received from that VM. The page polls `/api/dashboard` every 2
-seconds and updates the cards in place, and a textbox at the bottom shows
-the output of all agents across every VM (newest last); `/api/dashboard`
+seconds and updates the cards in place. `/api/dashboard` (including cross-VM findings)
 and `/runs` are plain JSON for scripting.
 
 The manifest embeds the Python sources in a ConfigMap. After changing any

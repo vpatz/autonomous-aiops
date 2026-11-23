@@ -150,7 +150,7 @@ def _approved_names(ansible_mcp):
         return []
 
 
-def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
+def build_selector_node(ansible_mcp=None, use_llm=True, eda=False, on_progress=None):
     """Return the LangGraph node that assembles the approved remediation plan."""
 
     @agent_tracing.agent(state.NODE_SELECTOR)
@@ -159,6 +159,8 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
 
         service_name = workflow_state["service_name"]
         root_cause = workflow_state.get("root_cause", {})
+        if on_progress:
+            on_progress(service_name, "remedy", "Selecting an approved recovery action…")
         if eda:
             # This stream's rulebook contract is a restart of the demo unit.
             # It is not an arbitrary Ansible module or shell execution endpoint.
@@ -230,7 +232,7 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
     return selector_node
 
 
-def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None):
+def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None, on_progress=None):
     """Return the LangGraph node that executes the plan and re-verifies."""
 
     @agent_tracing.agent(state.NODE_EXECUTOR)
@@ -243,11 +245,15 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         approved = set(workflow_state.get("remediation", {}).get("approved_tools", []))
         attempts = workflow_state.get("attempts", 0) + 1
         max_attempts = workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS)
+        def progress(message):
+            if on_progress:
+                on_progress(service_name, "remedy", f"Attempt {attempts}/{max_attempts}: {message}")
 
         results = []
         ok = True
         vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
         if deliver is not None:
+            progress(f"Sending {plan[0]['tool']} to EDA…")
             eda_record = deliver(build_eda_payload("restart_vm" if vm_restart else "restart", service_name, plan,
                                                    workflow_state.get("root_cause", {})))
             ok = eda_record.get("ok", False)
@@ -261,6 +267,7 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
                 ok = False
                 continue
             try:
+                progress(f"Running {tool}…")
                 output = ansible_mcp.call_tool(tool, step.get("arguments") or {})
                 results.append({"step": step, "ok": True, "output": truncate(output)})
             except (mcp_client.McpError, OSError, AttributeError) as exc:
@@ -288,6 +295,8 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         verify_since = time.monotonic()
         telemetry = workflow_state.get("telemetry", {})
         if get_window is not None:
+            delivery = "EDA accepted the request" if deliver is not None else "Plan executed"
+            progress(f"{delivery}; waiting for fresh telemetry to verify recovery…")
             telemetry = get_window(service_name, window_seconds, since=verify_since)
             deadline = time.monotonic() + max(240 if vm_restart else 0, verify_wait_seconds)
             while time.monotonic() < deadline:

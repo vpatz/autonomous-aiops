@@ -24,6 +24,7 @@ data:
     """
 
     import operator
+    import time
     from typing import Annotated, TypedDict
 
     STEP = "workflow state"
@@ -49,6 +50,10 @@ data:
     DEFAULT_POLL_SECONDS = 10
     DEFAULT_COOLDOWN_SECONDS = 120
     DEFAULT_VERIFY_WAIT_SECONDS = 30
+
+
+    def utc_timestamp():
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
     class WorkflowState(TypedDict, total=False):
@@ -2288,7 +2293,7 @@ data:
         }
 
 
-    def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
+    def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None):
         """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
         @agent_tracing.agent(state.NODE_RCA)
@@ -2300,12 +2305,17 @@ data:
             service_name = workflow_state["service_name"]
             anomaly = workflow_state.get("anomaly", {})
             investigation = list(workflow_state.get("investigation", []))
+            def progress(message):
+                if on_progress:
+                    on_progress(service_name, "rca", f"Iteration {iteration}: {message}")
+
+            progress("Checking host state and available diagnostics…")
             if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
                     and is_vm_halted(service_name)):
                 summary = f"KubeVirt reports {service_name} is configured to stop; guest telemetry is silent."
                 return Command(goto=state.NODE_SELECTOR, update={
                      "iteration": iteration, "vm_halted": True, "detector_evidence": {},
-                    "root_cause": {"component": "VirtualMachine", "confidence": "high",
+                     "root_cause": {"at": state.utc_timestamp(), "component": "VirtualMachine", "confidence": "high",
                                    "summary": summary, "found": True},
                     "findings": [f"[{STEP}] {summary}"]})
 
@@ -2322,6 +2332,7 @@ data:
             decision = None
             if use_llm and llm.available() and tools:
                 try:
+                    progress("Waiting for the model to choose the next check…")
                     decision = _llm_next_action(
                         service_name, anomaly, investigation, tools, iteration, max_iterations,
                         workflow_state.get("detector_evidence", {}),
@@ -2353,12 +2364,15 @@ data:
                     else:
                         decision = fallback
                 if decision.get("action") == "call_tool":
+                    started_at = state.utc_timestamp()
                     try:
+                        progress(f"Tool call {len(workflow_state.get('investigation', [])) + 1}: running {tool}…")
                         output = linux_mcp.call_tool(tool, arguments)
                         status = "ok"
                     except (mcp_client.McpError, OSError) as exc:
                         output, status = str(exc), "error"
                     entry = {
+                        "started_at": started_at,
                         "iteration": iteration,
                         "tool": tool,
                         "arguments": arguments,
@@ -2383,6 +2397,7 @@ data:
 
             # Conclude (or the iteration budget is spent).
             root_cause = decision.get("root_cause") or _conclude(investigation)
+            root_cause["at"] = state.utc_timestamp()
             root_cause.setdefault("found", True)
             if iteration > max_iterations:
                 root_cause["found"] = bool(root_cause.get("confidence") != "low")
@@ -2695,7 +2710,7 @@ data:
             return []
 
 
-    def build_selector_node(ansible_mcp=None, use_llm=True, eda=False):
+    def build_selector_node(ansible_mcp=None, use_llm=True, eda=False, on_progress=None):
         """Return the LangGraph node that assembles the approved remediation plan."""
 
         @agent_tracing.agent(state.NODE_SELECTOR)
@@ -2704,6 +2719,8 @@ data:
 
             service_name = workflow_state["service_name"]
             root_cause = workflow_state.get("root_cause", {})
+            if on_progress:
+                on_progress(service_name, "remedy", "Selecting an approved recovery action…")
             if eda:
                 # This stream's rulebook contract is a restart of the demo unit.
                 # It is not an arbitrary Ansible module or shell execution endpoint.
@@ -2775,7 +2792,7 @@ data:
         return selector_node
 
 
-    def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None):
+    def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=30, deliver=None, on_progress=None):
         """Return the LangGraph node that executes the plan and re-verifies."""
 
         @agent_tracing.agent(state.NODE_EXECUTOR)
@@ -2788,11 +2805,15 @@ data:
             approved = set(workflow_state.get("remediation", {}).get("approved_tools", []))
             attempts = workflow_state.get("attempts", 0) + 1
             max_attempts = workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS)
+            def progress(message):
+                if on_progress:
+                    on_progress(service_name, "remedy", f"Attempt {attempts}/{max_attempts}: {message}")
 
             results = []
             ok = True
             vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
             if deliver is not None:
+                progress(f"Sending {plan[0]['tool']} to EDA…")
                 eda_record = deliver(build_eda_payload("restart_vm" if vm_restart else "restart", service_name, plan,
                                                        workflow_state.get("root_cause", {})))
                 ok = eda_record.get("ok", False)
@@ -2806,6 +2827,7 @@ data:
                     ok = False
                     continue
                 try:
+                    progress(f"Running {tool}…")
                     output = ansible_mcp.call_tool(tool, step.get("arguments") or {})
                     results.append({"step": step, "ok": True, "output": truncate(output)})
                 except (mcp_client.McpError, OSError, AttributeError) as exc:
@@ -2833,6 +2855,8 @@ data:
             verify_since = time.monotonic()
             telemetry = workflow_state.get("telemetry", {})
             if get_window is not None:
+                delivery = "EDA accepted the request" if deliver is not None else "Plan executed"
+                progress(f"{delivery}; waiting for fresh telemetry to verify recovery…")
                 telemetry = get_window(service_name, window_seconds, since=verify_since)
                 deadline = time.monotonic() + max(240 if vm_restart else 0, verify_wait_seconds)
                 while time.monotonic() < deadline:
@@ -3057,6 +3081,7 @@ data:
         is_vm_halted=None,
         get_evidence=None,
         on_model_result=None,
+        on_progress=None,
     ):
         """Compile the workflow graph. Dependencies are injected for testability:
         real MCP clients and live windows in production, fakes in self-checks."""
@@ -3067,12 +3092,12 @@ data:
             silence_seconds=silence_seconds, use_llm=use_llm, get_evidence=get_evidence,
             on_model_result=on_model_result))
         graph.add_node(state.NODE_RCA, root_cause_analyzer.build_node(
-            linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted))
+            linux_mcp=linux_mcp, use_llm=use_llm, is_vm_halted=is_vm_halted, on_progress=on_progress))
         graph.add_node(state.NODE_SELECTOR, remediation_selector.build_selector_node(
-            ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None))
+            ansible_mcp=ansible_mcp, use_llm=use_llm, eda=deliver is not None, on_progress=on_progress))
         graph.add_node(state.NODE_EXECUTOR, remediation_selector.build_executor_node(
             ansible_mcp=ansible_mcp, get_window=get_window, verify_wait_seconds=verify_wait_seconds,
-            deliver=deliver))
+            deliver=deliver, on_progress=on_progress))
         graph.add_edge(START, state.NODE_DETECTOR)
         # All other routing is dynamic: nodes return Command(goto=...), including
         # Command(goto=END) to finish.
@@ -3337,7 +3362,7 @@ data:
         return _inventory["vms"]
 
 
-    def build_deps(args, store=None):
+    def build_deps(args, store=None, on_progress=None):
         """Build the graph with real clients from the environment (or overrides)."""
         insecure = getattr(args, "insecure_tls", False)
 
@@ -3368,6 +3393,7 @@ data:
             is_vm_halted=confirmed_halted if deliver else None,
             get_evidence=store.recent_evidence if store is not None else None,
             on_model_result=WorkflowHandler.record_model_result,
+            on_progress=on_progress,
         )
         return app, linux, ansible
 
@@ -3456,13 +3482,48 @@ data:
 
         runs = {}  # service_name -> latest final state (or {"running": True})
         runs_lock = threading.Lock()
+        changed = threading.Condition(runs_lock)
+        revision = 0
+
+        @classmethod
+        def publish_run(cls, service, snapshot):
+            with cls.changed:
+                cls.runs[service] = {**snapshot, "updated_at": state.utc_timestamp()}
+                cls.revision += 1
+                cls.changed.notify_all()
+
+        @classmethod
+        def progress(cls, service, panel, message):
+            with cls.changed:
+                cls.runs[service] = {**cls.runs.get(service, {}), "pending": {
+                    panel: f"[{state.utc_timestamp()}] {message}"}}
+                cls.revision += 1
+                cls.changed.notify_all()
+
+        def stream_changes(self):
+            """Notify browsers of new state; never hold the runs lock during network writes."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            seen = -1
+            try:
+                while True:
+                    with self.changed:
+                        updated = self.changed.wait_for(lambda: self.revision != seen, timeout=15)
+                        seen = self.revision
+                    self.wfile.write((f"data: {seen}\n\n" if updated else ": heartbeat\n\n").encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         model_results = {}  # per-VM incident history, oldest first; healthy polls do not append
 
         @classmethod
         def record_model_result(cls, service, verifying, verdict, failure=None):
             with cls.runs_lock:
                 entry = {
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "at": state.utc_timestamp(),
                     "phase": "verification" if verifying else "detection",
                     "verdict": verdict,
                     "failure": failure,
@@ -3474,6 +3535,9 @@ data:
             from urllib.parse import parse_qs, urlparse
 
             parsed_url = urlparse(self.path)
+            if parsed_url.path == "/api/run-events":
+                self.stream_changes()
+                return
             if parsed_url.path == "/api/dashboard":
                 payload = dashboard_data(self.store, self.runs, self.runs_lock, model_results=self.model_results)
                 body = json.dumps(payload, default=str).encode()
@@ -3536,6 +3600,8 @@ data:
             if run:
                 run_view = {
                     "status": "running" if run.get("running") else run.get("status"),
+                    "pending": run.get("pending", {}),
+                    "updated_at": run.get("updated_at"),
                     "anomaly": run.get("anomaly", {}),
                     "root_cause": run.get("root_cause", {}),
                     "investigation": run.get("investigation", []),
@@ -3607,7 +3673,7 @@ data:
     <html lang="en">
     <head>
       <meta charset="utf-8">
-      <title>AIOps unified view</title>
+      <title>Agentic AI Ops Dashboard</title>
       <style>
         :root {
           --bg: #0b1220; --card: #141d30; --edge: #293548; --ink: #e6edf6;
@@ -3672,25 +3738,15 @@ data:
                 border: 1px solid var(--edge); border-radius: 8px; padding: .45rem .6rem;
                 margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
                 font-size: .72rem; line-height: 1.35; flex: 1; min-height: 7.2rem; }
-        .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
-        .timeline summary { font-size: 1rem; color: var(--muted); font-weight: 600; }
-        textarea.agent-output { width: 100%; resize: vertical; background: #0b1220; color: #9fb3c8;
-                border: 1px solid var(--edge); border-radius: 10px; padding: .6rem .8rem;
-                font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
-                line-height: 1.4; min-height: 18rem; }
         noscript { color: var(--warn); padding: 2rem; display: block; }
       </style>
     </head>
     <body>
       <header>
-        <h1>AIOps unified view <span>&mdash; autonomous remediation</span></h1>
+        <h1>Agentic AI Ops Dashboard</h1>
         <div class="stats" id="stats">loading&hellip;</div>
       </header>
       <main class="grid" id="cards"></main>
-      <details class="timeline">
-        <summary>Agent output (all VMs, newest last)</summary>
-        <textarea id="agentOutput" aria-label="Agent output for all VMs" class="messages agent-output" readonly rows="20"></textarea>
-      </details>
       <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
       <script>
       (function () {
@@ -3698,7 +3754,6 @@ data:
         const REFRESH_MS = 2000;
         const cardsRoot = document.getElementById('cards');
         const statsEl = document.getElementById('stats');
-        const agentOutput = document.getElementById('agentOutput');
         const cards = new Map();
 
         function el(tag, cls, text) {
@@ -3891,31 +3946,37 @@ data:
           return text.length > 180 ? text.slice(0, 179) + '…' : text;
         }
 
+        function stamped(at, message) {
+          return at ? `[${at}] ${message}` : message;
+        }
+
         function rcaMessage(run) {
-          const lines = (run?.investigation || []).map(step => {
+          const lines = (run?.investigation || []).map((step, index) => {
             const arg = step.arguments?.command || step.arguments?.service_name || step.arguments?.path;
             const snippet = toolSnippet(step.output);
-            return `Iteration ${step.iteration}: ${step.tool}${arg ? ' — ' + arg : ''} (${step.status})` +
-              (snippet ? ': ' + snippet : '');
+            return stamped(step.started_at, `Iteration ${step.iteration}: Tool call ${index + 1}: ${step.tool}` +
+              (arg ? ' — ' + arg : '') + ` (${step.status})` + (snippet ? ': ' + snippet : ''));
           });
           const rc = run?.root_cause;
-          if (rc?.summary) lines.push(`Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`);
+          if (rc?.summary) lines.push(stamped(rc.at, `Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`));
+          if (run?.pending?.rca) lines.push(run.pending.rca);
           return lines.length ? lines.map(line => line.replace(/\s+/g, ' ').trim()).join('\n')
-            : (run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
+            : stamped(run?.updated_at, run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
         }
 
         function remedyMessage(run) {
+          if (run?.pending?.remedy) return run.pending.remedy;
           const actions = (run?.plan || []).map(step => step.tool).join(', ');
           if (!actions) {
             const reason = run?.remediation?.rationale || run?.remedy_findings?.at(-1);
-            return reason ? reason.replace(/^\[[^\]]+\]\s*/, '')
-              : (run?.status === 'running' ? 'Workflow in progress; awaiting remediation outcome.' : 'No remediation recorded.');
+            return stamped(run?.updated_at, reason ? reason.replace(/^\[[^\]]+\]\s*/, '')
+              : (run?.status === 'running' ? 'Workflow in progress; awaiting remediation outcome.' : 'No remediation recorded.'));
           }
           const eda = run.result?.eda?.status;
           const outcome = run.status === 'remediated' ? 'Recovery verified'
             : run.status === 'failed' ? 'Recovery failed' : 'Recovery not yet verified';
-          return `${outcome}: ${actions} (attempts ${run.attempts}/${run.max_attempts})` +
-            (eda && eda !== 'not configured' ? `; EDA: ${eda}` : '');
+          return stamped(run.updated_at, `${outcome}: ${actions} (attempts ${run.attempts}/${run.max_attempts})` +
+            (eda && eda !== 'not configured' ? `; EDA: ${eda}` : ''));
         }
 
         function updateCard(svc, refs) {
@@ -4000,20 +4061,24 @@ data:
             refs.requests.set(null, '', true);
             refs.msgBox.value = 'no messages in the last 30s';
           });
-          // All agents' output for every VM, newest last, in one textbox.
-          agentOutput.value = data.findings.length
-            ? data.findings.map(function (item) {
-                return '[' + item.service + '] ' + item.finding;
-              }).join('\n')
-            : 'no agent output yet';
-          agentOutput.scrollTop = agentOutput.scrollHeight;
         }
 
+        let fetching = false, refreshAgain = false;
         function poll() {
-          fetch('/api/dashboard')
+          if (fetching) { refreshAgain = true; return; }
+          fetching = true;
+          fetch('/api/dashboard', {cache: 'no-store'})
             .then(function (r) { return r.json(); })
             .then(update)
-            .catch(function () { statsEl.textContent = 'connection lost — retrying'; });
+            .catch(function () { statsEl.textContent = 'connection lost — retrying'; })
+            .finally(function () {
+              fetching = false;
+              if (refreshAgain) { refreshAgain = false; poll(); }
+            });
+        }
+        if (window.EventSource) {
+          const events = new EventSource('/api/run-events');
+          events.onmessage = poll;
         }
         setInterval(poll, REFRESH_MS);
         poll();
@@ -4044,13 +4109,12 @@ data:
         def run_for_service(service_name, telemetry, trigger):
             try:
                 snapshot = {}
-                with WorkflowHandler.runs_lock:
-                    WorkflowHandler.runs[service_name] = {"running": True}
+                WorkflowHandler.publish_run(service_name, {"running": True})
                 anomaly = anomaly_detector.summarize_incident(
                     service_name, telemetry, trigger, args.silence_seconds,
                     get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
                     evidence_snapshot=snapshot)
-                app, linux, ansible = build_deps(args, store=store)
+                app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
                 workflow_state = state.initial_state(
                     service_name,
                     window_seconds=args.window_seconds,
@@ -4063,18 +4127,15 @@ data:
                 def publish_step(snapshot):
                     keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
                             "findings", "attempts", "max_attempts")
-                    with WorkflowHandler.runs_lock:
-                        WorkflowHandler.runs[service_name] = {
-                            "running": True, **{k: snapshot[k] for k in keys if k in snapshot}}
+                    WorkflowHandler.publish_run(service_name, {
+                        "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
 
                 final = graph.run(app, workflow_state, label=service_name, on_step=publish_step)
-                with WorkflowHandler.runs_lock:
-                    WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
+                WorkflowHandler.publish_run(service_name, final or {"status": "unknown"})
                 close_clients(linux, ansible)
             except Exception as exc:  # noqa: BLE001 - a failed run must not kill the poller
                 print(f"{STEP}: run for {service_name} failed: {exc}", flush=True)
-                with WorkflowHandler.runs_lock:
-                    WorkflowHandler.runs[service_name] = {"running": False, "status": "error", "error": str(exc)}
+                WorkflowHandler.publish_run(service_name, {"running": False, "status": "error", "error": str(exc)})
             finally:
                 finished_at[service_name] = time.monotonic()
                 running.discard(service_name)
@@ -4253,10 +4314,10 @@ data:
             raise SystemExit(f"{STEP}: dashboard data findings missing")
         json.dumps(data, default=str)  # must be JSON-serializable
         shell = render_dashboard_shell()
-        for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
+        for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll",
                        "repeat(2, minmax(0, 1fr))", "cardIn", "animationDelay", "textarea",
                        "messages", "not detected", "vm-flowing", "vm-silent", "vm-down",
-                       "agentOutput", "wrap.style.opacity"):
+                       "rcaBox", "remedyBox", "wrap.style.opacity"):
             if marker not in shell:
                 raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
         # Cards must never be removed for a down VM, and the status bar is

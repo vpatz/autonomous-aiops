@@ -116,7 +116,7 @@ def vm_inventory(namespace=None, refresh_seconds=VM_INVENTORY_SECONDS):
     return _inventory["vms"]
 
 
-def build_deps(args, store=None):
+def build_deps(args, store=None, on_progress=None):
     """Build the graph with real clients from the environment (or overrides)."""
     insecure = getattr(args, "insecure_tls", False)
 
@@ -147,6 +147,7 @@ def build_deps(args, store=None):
         is_vm_halted=confirmed_halted if deliver else None,
         get_evidence=store.recent_evidence if store is not None else None,
         on_model_result=WorkflowHandler.record_model_result,
+        on_progress=on_progress,
     )
     return app, linux, ansible
 
@@ -235,13 +236,48 @@ class WorkflowHandler(collector.CollectorHandler):
 
     runs = {}  # service_name -> latest final state (or {"running": True})
     runs_lock = threading.Lock()
+    changed = threading.Condition(runs_lock)
+    revision = 0
+
+    @classmethod
+    def publish_run(cls, service, snapshot):
+        with cls.changed:
+            cls.runs[service] = {**snapshot, "updated_at": state.utc_timestamp()}
+            cls.revision += 1
+            cls.changed.notify_all()
+
+    @classmethod
+    def progress(cls, service, panel, message):
+        with cls.changed:
+            cls.runs[service] = {**cls.runs.get(service, {}), "pending": {
+                panel: f"[{state.utc_timestamp()}] {message}"}}
+            cls.revision += 1
+            cls.changed.notify_all()
+
+    def stream_changes(self):
+        """Notify browsers of new state; never hold the runs lock during network writes."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        seen = -1
+        try:
+            while True:
+                with self.changed:
+                    updated = self.changed.wait_for(lambda: self.revision != seen, timeout=15)
+                    seen = self.revision
+                self.wfile.write((f"data: {seen}\n\n" if updated else ": heartbeat\n\n").encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
     model_results = {}  # per-VM incident history, oldest first; healthy polls do not append
 
     @classmethod
     def record_model_result(cls, service, verifying, verdict, failure=None):
         with cls.runs_lock:
             entry = {
-                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "at": state.utc_timestamp(),
                 "phase": "verification" if verifying else "detection",
                 "verdict": verdict,
                 "failure": failure,
@@ -253,6 +289,9 @@ class WorkflowHandler(collector.CollectorHandler):
         from urllib.parse import parse_qs, urlparse
 
         parsed_url = urlparse(self.path)
+        if parsed_url.path == "/api/run-events":
+            self.stream_changes()
+            return
         if parsed_url.path == "/api/dashboard":
             payload = dashboard_data(self.store, self.runs, self.runs_lock, model_results=self.model_results)
             body = json.dumps(payload, default=str).encode()
@@ -315,6 +354,8 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
         if run:
             run_view = {
                 "status": "running" if run.get("running") else run.get("status"),
+                "pending": run.get("pending", {}),
+                "updated_at": run.get("updated_at"),
                 "anomaly": run.get("anomaly", {}),
                 "root_cause": run.get("root_cause", {}),
                 "investigation": run.get("investigation", []),
@@ -386,7 +427,7 @@ def render_dashboard_shell():
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>AIOps unified view</title>
+  <title>Agentic AI Ops Dashboard</title>
   <style>
     :root {
       --bg: #0b1220; --card: #141d30; --edge: #293548; --ink: #e6edf6;
@@ -451,25 +492,15 @@ def render_dashboard_shell():
             border: 1px solid var(--edge); border-radius: 8px; padding: .45rem .6rem;
             margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
             font-size: .72rem; line-height: 1.35; flex: 1; min-height: 7.2rem; }
-    .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
-    .timeline summary { font-size: 1rem; color: var(--muted); font-weight: 600; }
-    textarea.agent-output { width: 100%; resize: vertical; background: #0b1220; color: #9fb3c8;
-            border: 1px solid var(--edge); border-radius: 10px; padding: .6rem .8rem;
-            font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
-            line-height: 1.4; min-height: 18rem; }
     noscript { color: var(--warn); padding: 2rem; display: block; }
   </style>
 </head>
 <body>
   <header>
-    <h1>AIOps unified view <span>&mdash; autonomous remediation</span></h1>
+    <h1>Agentic AI Ops Dashboard</h1>
     <div class="stats" id="stats">loading&hellip;</div>
   </header>
   <main class="grid" id="cards"></main>
-  <details class="timeline">
-    <summary>Agent output (all VMs, newest last)</summary>
-    <textarea id="agentOutput" aria-label="Agent output for all VMs" class="messages agent-output" readonly rows="20"></textarea>
-  </details>
   <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
   <script>
   (function () {
@@ -477,7 +508,6 @@ def render_dashboard_shell():
     const REFRESH_MS = 2000;
     const cardsRoot = document.getElementById('cards');
     const statsEl = document.getElementById('stats');
-    const agentOutput = document.getElementById('agentOutput');
     const cards = new Map();
 
     function el(tag, cls, text) {
@@ -670,31 +700,37 @@ def render_dashboard_shell():
       return text.length > 180 ? text.slice(0, 179) + '…' : text;
     }
 
+    function stamped(at, message) {
+      return at ? `[${at}] ${message}` : message;
+    }
+
     function rcaMessage(run) {
-      const lines = (run?.investigation || []).map(step => {
+      const lines = (run?.investigation || []).map((step, index) => {
         const arg = step.arguments?.command || step.arguments?.service_name || step.arguments?.path;
         const snippet = toolSnippet(step.output);
-        return `Iteration ${step.iteration}: ${step.tool}${arg ? ' — ' + arg : ''} (${step.status})` +
-          (snippet ? ': ' + snippet : '');
+        return stamped(step.started_at, `Iteration ${step.iteration}: Tool call ${index + 1}: ${step.tool}` +
+          (arg ? ' — ' + arg : '') + ` (${step.status})` + (snippet ? ': ' + snippet : ''));
       });
       const rc = run?.root_cause;
-      if (rc?.summary) lines.push(`Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`);
+      if (rc?.summary) lines.push(stamped(rc.at, `Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`));
+      if (run?.pending?.rca) lines.push(run.pending.rca);
       return lines.length ? lines.map(line => line.replace(/\s+/g, ' ').trim()).join('\n')
-        : (run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
+        : stamped(run?.updated_at, run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
     }
 
     function remedyMessage(run) {
+      if (run?.pending?.remedy) return run.pending.remedy;
       const actions = (run?.plan || []).map(step => step.tool).join(', ');
       if (!actions) {
         const reason = run?.remediation?.rationale || run?.remedy_findings?.at(-1);
-        return reason ? reason.replace(/^\[[^\]]+\]\s*/, '')
-          : (run?.status === 'running' ? 'Workflow in progress; awaiting remediation outcome.' : 'No remediation recorded.');
+        return stamped(run?.updated_at, reason ? reason.replace(/^\[[^\]]+\]\s*/, '')
+          : (run?.status === 'running' ? 'Workflow in progress; awaiting remediation outcome.' : 'No remediation recorded.'));
       }
       const eda = run.result?.eda?.status;
       const outcome = run.status === 'remediated' ? 'Recovery verified'
         : run.status === 'failed' ? 'Recovery failed' : 'Recovery not yet verified';
-      return `${outcome}: ${actions} (attempts ${run.attempts}/${run.max_attempts})` +
-        (eda && eda !== 'not configured' ? `; EDA: ${eda}` : '');
+      return stamped(run.updated_at, `${outcome}: ${actions} (attempts ${run.attempts}/${run.max_attempts})` +
+        (eda && eda !== 'not configured' ? `; EDA: ${eda}` : ''));
     }
 
     function updateCard(svc, refs) {
@@ -779,20 +815,24 @@ def render_dashboard_shell():
         refs.requests.set(null, '', true);
         refs.msgBox.value = 'no messages in the last 30s';
       });
-      // All agents' output for every VM, newest last, in one textbox.
-      agentOutput.value = data.findings.length
-        ? data.findings.map(function (item) {
-            return '[' + item.service + '] ' + item.finding;
-          }).join('\n')
-        : 'no agent output yet';
-      agentOutput.scrollTop = agentOutput.scrollHeight;
     }
 
+    let fetching = false, refreshAgain = false;
     function poll() {
-      fetch('/api/dashboard')
+      if (fetching) { refreshAgain = true; return; }
+      fetching = true;
+      fetch('/api/dashboard', {cache: 'no-store'})
         .then(function (r) { return r.json(); })
         .then(update)
-        .catch(function () { statsEl.textContent = 'connection lost — retrying'; });
+        .catch(function () { statsEl.textContent = 'connection lost — retrying'; })
+        .finally(function () {
+          fetching = false;
+          if (refreshAgain) { refreshAgain = false; poll(); }
+        });
+    }
+    if (window.EventSource) {
+      const events = new EventSource('/api/run-events');
+      events.onmessage = poll;
     }
     setInterval(poll, REFRESH_MS);
     poll();
@@ -823,13 +863,12 @@ def serve_forever(args):
     def run_for_service(service_name, telemetry, trigger):
         try:
             snapshot = {}
-            with WorkflowHandler.runs_lock:
-                WorkflowHandler.runs[service_name] = {"running": True}
+            WorkflowHandler.publish_run(service_name, {"running": True})
             anomaly = anomaly_detector.summarize_incident(
                 service_name, telemetry, trigger, args.silence_seconds,
                 get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
                 evidence_snapshot=snapshot)
-            app, linux, ansible = build_deps(args, store=store)
+            app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
             workflow_state = state.initial_state(
                 service_name,
                 window_seconds=args.window_seconds,
@@ -842,18 +881,15 @@ def serve_forever(args):
             def publish_step(snapshot):
                 keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
                         "findings", "attempts", "max_attempts")
-                with WorkflowHandler.runs_lock:
-                    WorkflowHandler.runs[service_name] = {
-                        "running": True, **{k: snapshot[k] for k in keys if k in snapshot}}
+                WorkflowHandler.publish_run(service_name, {
+                    "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
 
             final = graph.run(app, workflow_state, label=service_name, on_step=publish_step)
-            with WorkflowHandler.runs_lock:
-                WorkflowHandler.runs[service_name] = final or {"status": "unknown"}
+            WorkflowHandler.publish_run(service_name, final or {"status": "unknown"})
             close_clients(linux, ansible)
         except Exception as exc:  # noqa: BLE001 - a failed run must not kill the poller
             print(f"{STEP}: run for {service_name} failed: {exc}", flush=True)
-            with WorkflowHandler.runs_lock:
-                WorkflowHandler.runs[service_name] = {"running": False, "status": "error", "error": str(exc)}
+            WorkflowHandler.publish_run(service_name, {"running": False, "status": "error", "error": str(exc)})
         finally:
             finished_at[service_name] = time.monotonic()
             running.discard(service_name)
@@ -1032,10 +1068,10 @@ def self_check():
         raise SystemExit(f"{STEP}: dashboard data findings missing")
     json.dumps(data, default=str)  # must be JSON-serializable
     shell = render_dashboard_shell()
-    for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll", "timeline",
+    for marker in ("/api/dashboard", "makeDial", "needle", "setInterval", "poll",
                    "repeat(2, minmax(0, 1fr))", "cardIn", "animationDelay", "textarea",
                    "messages", "not detected", "vm-flowing", "vm-silent", "vm-down",
-                   "agentOutput", "wrap.style.opacity"):
+                   "rcaBox", "remedyBox", "wrap.style.opacity"):
         if marker not in shell:
             raise SystemExit(f"{STEP}: dashboard shell missing {marker!r}")
     # Cards must never be removed for a down VM, and the status bar is

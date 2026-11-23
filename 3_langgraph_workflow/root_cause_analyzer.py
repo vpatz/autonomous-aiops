@@ -142,7 +142,7 @@ def _conclude(investigation):
     }
 
 
-def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
+def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None, on_progress=None):
     """Return the LangGraph node for the root cause analyzer (inner loop)."""
 
     @agent_tracing.agent(state.NODE_RCA)
@@ -154,12 +154,17 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
         service_name = workflow_state["service_name"]
         anomaly = workflow_state.get("anomaly", {})
         investigation = list(workflow_state.get("investigation", []))
+        def progress(message):
+            if on_progress:
+                on_progress(service_name, "rca", f"Iteration {iteration}: {message}")
+
+        progress("Checking host state and available diagnostics…")
         if (is_vm_halted and "metrics-silent" in anomaly.get("signals", [])
                 and is_vm_halted(service_name)):
             summary = f"KubeVirt reports {service_name} is configured to stop; guest telemetry is silent."
             return Command(goto=state.NODE_SELECTOR, update={
                  "iteration": iteration, "vm_halted": True, "detector_evidence": {},
-                "root_cause": {"component": "VirtualMachine", "confidence": "high",
+                 "root_cause": {"at": state.utc_timestamp(), "component": "VirtualMachine", "confidence": "high",
                                "summary": summary, "found": True},
                 "findings": [f"[{STEP}] {summary}"]})
 
@@ -176,6 +181,7 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
         decision = None
         if use_llm and llm.available() and tools:
             try:
+                progress("Waiting for the model to choose the next check…")
                 decision = _llm_next_action(
                     service_name, anomaly, investigation, tools, iteration, max_iterations,
                     workflow_state.get("detector_evidence", {}),
@@ -207,12 +213,15 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
                 else:
                     decision = fallback
             if decision.get("action") == "call_tool":
+                started_at = state.utc_timestamp()
                 try:
+                    progress(f"Tool call {len(workflow_state.get('investigation', [])) + 1}: running {tool}…")
                     output = linux_mcp.call_tool(tool, arguments)
                     status = "ok"
                 except (mcp_client.McpError, OSError) as exc:
                     output, status = str(exc), "error"
                 entry = {
+                    "started_at": started_at,
                     "iteration": iteration,
                     "tool": tool,
                     "arguments": arguments,
@@ -237,6 +246,7 @@ def build_node(linux_mcp=None, use_llm=True, is_vm_halted=None):
 
         # Conclude (or the iteration budget is spent).
         root_cause = decision.get("root_cause") or _conclude(investigation)
+        root_cause["at"] = state.utc_timestamp()
         root_cause.setdefault("found", True)
         if iteration > max_iterations:
             root_cause["found"] = bool(root_cause.get("confidence") != "low")

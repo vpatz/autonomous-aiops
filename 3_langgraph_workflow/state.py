@@ -17,6 +17,7 @@ Verify:
 """
 
 import operator
+import time
 from typing import Annotated, TypedDict
 
 STEP = "workflow state"
@@ -42,6 +43,10 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_POLL_SECONDS = 10
 DEFAULT_COOLDOWN_SECONDS = 120
 DEFAULT_VERIFY_WAIT_SECONDS = 30
+
+
+def utc_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 class WorkflowState(TypedDict, total=False):
