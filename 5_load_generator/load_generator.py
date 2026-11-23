@@ -54,7 +54,8 @@ STEP = "load generator"
 DEFAULT_NAMESPACE = "my-vm-project"
 DEFAULT_SSH_USER = "rheluser"
 DEFAULT_IDENTITY = os.path.expanduser("~/.ssh/mcp_id_ed25519")
-RAMP_CYCLE = tuple(range(1, 500, 5)) + (500,) * 10
+PEAK_HOLD_SECONDS = 5
+RAMP_CYCLE = tuple(range(1, 500, 5)) + (500,) * PEAK_HOLD_SECONDS
 DEFAULT_VMS = ["rhel10-service-1", "rhel10-service-2", "rhel10-service-3", "rhel10-service-4"]
 
 # Endpoints exposed by 1_vm_services/service.py
@@ -237,7 +238,7 @@ def run_load(cfg):
         raise LoadError("no target VMs (pass --vm, set DASHBOARD_VMS, or run in a namespace with VMIs)")
     print(f"[{STEP}] targets: {', '.join(targets)}", flush=True)
     print(f"[{STEP}] transport: {'http' if (cfg.url_template or cfg.urls) else 'ssh (oc virt ssh -> curl :5000)'}", flush=True)
-    profile = "1/s +5/s each second, hold 500/s for 10s, repeat" if cfg.rate is None else f"{cfg.rate}/s"
+    profile = f"1/s +5/s each second, hold 500/s for {PEAK_HOLD_SECONDS}s, repeat" if cfg.rate is None else f"{cfg.rate}/s"
     print(f"[{STEP}] target={profile} workers={cfg.workers}", flush=True)
 
     if cfg.dry_run:
@@ -344,7 +345,7 @@ def main():
     parser.add_argument("--requests", type=int, help="scheduled request slots (ignored with --duration)")
     parser.add_argument("--duration", type=float, default=None, help="run for N seconds instead of a fixed count")
     parser.add_argument("--rate", type=float, help="use fixed requests/second instead of the default 1 to 500 ramp")
-    parser.add_argument("--workers", type=int, default=128, help="concurrent workers (default: %(default)s)")
+    parser.add_argument("--workers", type=int, default=512, help="concurrent workers (default: %(default)s)")
     parser.add_argument("--timeout", type=float, default=5.0, help="per-request timeout seconds")
     parser.add_argument("--seed", type=int, default=None, help="random seed for reproducible runs")
     parser.add_argument("--kubeconfig", default="", help="kubeconfig for oc")
@@ -386,9 +387,9 @@ def main():
 def self_check():
     # Pure-function checks: no cluster, no network.
     from collections import Counter
-    ramp = argparse.Namespace(rate=None, duration=221, requests=None)
+    ramp = argparse.Namespace(rate=None, duration=211, requests=None)
     counts = Counter(int(offset) for offset, _ in slots(ramp))
-    assert [counts[s] for s in range(221)] == (list(range(1, 500, 5)) + [500] * 10) * 2 + [1]
+    assert [counts[s] for s in range(211)] == (list(range(1, 500, 5)) + [500] * 5) * 2 + [1]
     rng_a = random.Random(42)
     rng_b = random.Random(42)
     # pick_endpoint must be reproducible with same seed

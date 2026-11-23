@@ -28,6 +28,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from state import LLM_EVIDENCE_SECONDS
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
     ExportLogsServiceRequest,
@@ -202,7 +203,7 @@ class TelemetryStore:
 
     def retain_export(self, service, signal, resource, received_at):
         with self._lock:
-            cutoff = time.monotonic() - 30
+            cutoff = time.monotonic() - LLM_EVIDENCE_SECONDS
             self._expire_exports(cutoff)
             if received_at >= cutoff:
                 self._exports.setdefault(int(received_at), []).append(
@@ -214,8 +215,8 @@ class TelemetryStore:
 
         now = time.monotonic()
         with self._lock:
-            self._expire_exports(now - 30)
-            cutoff = max(now - 30, since)
+            self._expire_exports(now - LLM_EVIDENCE_SECONDS)
+            cutoff = max(now - LLM_EVIDENCE_SECONDS, since)
             records = [r for bucket in self._exports.values() for r in bucket
                        if r[1] == service and cutoff <= r[0] <= now]
         return {f"{signal}:{i}": {"age_seconds": round(now - at, 3),

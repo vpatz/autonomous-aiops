@@ -22,11 +22,11 @@ oc -n my-vm-project logs -f deployment/aiops-load-generator --tail=10
 
 ## 2. Establish the baseline
 
-Wait for `rhel10-service-1` and `rhel10-service-2` to show **flowing**, successful client responses, and no investigation in progress. Allow at least 30 seconds for a full detector window. If repeating a previous run, allow for the per-VM incident cooldown (default 120 seconds).
+Wait for `rhel10-service-1` and `rhel10-service-2` to show **flowing**, successful client responses, and no investigation in progress. Allow at least 10 seconds for a full detector LLM evidence window. If repeating a previous run, allow for the per-VM incident cooldown (default 120 seconds).
 
 Point out three different measurements:
 
-- The generator ramps from **1 to 500 requests/s across all VMs**, holds for 10 seconds, and repeats. The concurrent-request dial shows requests in flight on that VM at the latest two-second metric export. It can read zero when requests complete between samples.
+- The generator ramps from **1 to 500 requests/s across all VMs**, holds for 5 seconds, and repeats. The concurrent-request dial shows requests in flight on that VM at the latest two-second metric export. It can read zero when requests complete between samples.
 - Every two seconds the generator sends per-VM, per-second HTTP outcomes. A `200` is a completed response; `no_response` means no HTTP status came back. Neither is a guest heartbeat.
 - **Latest anomaly detector LLM output** is the model's verdict. `{"detected":false}` means it found no *additional* anomaly; deterministic rules can still trigger RCA.
 
@@ -54,7 +54,7 @@ The agents receive telemetry and tool results, not chaos scenario labels. VM 2 i
 Open an `aiops.workflow` trace tagged `aiops.vm=rhel10-service-1` from the injection time. Expand the root and select the `root_cause_analyzer` spans in order:
 
 1. **Inspect:** in **Outputs**, show `iteration`, `tools`, and `next`. For example, a `get_service_status` call followed by `next: root_cause_analyzer` means the graph will return to RCA with the result.
-2. **Follow up:** the next iteration can fetch `get_service_logs` or another advertised diagnostic. The RCA model gets the detector's same 30-second evidence snapshot plus its investigation history. The default budget is **25 tool calls**, not a required number.
+2. **Follow up:** the next iteration can fetch `get_service_logs` or another advertised diagnostic. The RCA model gets the detector's same 10-second evidence snapshot plus its investigation history. The default budget is **25 tool calls**, not a required number.
 3. **Conclude:** point to `component`, `confidence`, and `next: remediation_selector`. MLflow shows the decision and timing; use the dashboard findings for the tool-result excerpts.
 
 If VM 2 also triggered a run, open its separate trace and compare the timestamps and diagnosis. Overlapping runs on different VMs are independent; two symptoms on the same VM do not create two parallel RCA runs.

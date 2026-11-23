@@ -6,7 +6,7 @@ OpenAI, and so on. Configure with:
 
     LLM_BASE_URL   e.g. https://enmaas.example.com/v1 (include /v1)
     LLM_API_KEY    bearer token (optional for local vLLM)
-    LLM_MODEL      model name served at the endpoint
+    LLM_MODEL      optional override for the default DeepSeek V4.1 Flash model
 
 Every agent falls back to deterministic heuristics when the LLM is not
 configured or a call fails, so the demo always runs.
@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 
 STEP = "llm client"
+DEFAULT_MODEL = "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 
 class LlmError(Exception):
@@ -38,7 +39,7 @@ def config():
     return {
         "base_url": os.environ.get("LLM_BASE_URL", "").strip().rstrip("/"),
         "api_key": os.environ.get("LLM_API_KEY", "").strip(),
-        "model": os.environ.get("LLM_MODEL", "").strip(),
+        "model": os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL,
     }
 
 
@@ -69,7 +70,7 @@ def build_request(messages, tools=None, temperature=0.0, max_tokens=1024):
 def chat(messages, tools=None, temperature=0.0, max_tokens=1024):
     """One chat completion. Returns {"content": str, "tool_calls": list}."""
     if not available():
-        raise LlmError("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+        raise LlmError("LLM not configured (set LLM_BASE_URL)")
     request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
@@ -120,9 +121,11 @@ def self_check():
 
     saved = {key: os.environ.get(key) for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")}
     os.environ["LLM_BASE_URL"] = "https://llm.example.com/v1"
-    os.environ["LLM_MODEL"] = "test-model"
     os.environ.pop("LLM_API_KEY", None)
     try:
+        os.environ.pop("LLM_MODEL", None)
+        assert config()["model"] == DEFAULT_MODEL and available()
+        os.environ["LLM_MODEL"] = "test-model"
         parsed = _extract_json('Sure! ```json\n{"detected": true, "score": 2}\n```')
         if parsed != {"detected": True, "score": 2}:
             raise SystemExit(f"{STEP}: fenced JSON not parsed: {parsed}")
@@ -166,7 +169,7 @@ def main():
     args = parser.parse_args()
     if args.probe:
         if not available():
-            raise SystemExit("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+            raise SystemExit("LLM not configured (set LLM_BASE_URL)")
         reply = chat([{"role": "user", "content": "Reply with the single word: ok"}])
         print(f"model replied: {reply['content'][:200]}", flush=True)
         return

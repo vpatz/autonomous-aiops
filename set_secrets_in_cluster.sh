@@ -6,7 +6,7 @@
 # sourced automatically when present (it is gitignored and never committed):
 #
 #   export LLM_BASE_URL='https://<llm-host>/v1'
-#   export LLM_MODEL='<model>'
+#   export LLM_MODEL='<model>'   # optional override for the workflow default
 #   export LLM_API_KEY='<token>'
 #
 # Usage: ./set_secrets_in_cluster.sh
@@ -21,7 +21,6 @@ if [ -f "$SCRIPT_DIR/set_secrets_in_shell.sh" ]; then
 fi
 
 : "${LLM_BASE_URL:?not set - export it or create set_secrets_in_shell.sh}"
-: "${LLM_MODEL:?not set - export it or create set_secrets_in_shell.sh}"
 : "${LLM_API_KEY:?not set - export it or create set_secrets_in_shell.sh}"
 
 # oc requires key=value literals: a bare --from-literal=KEY does NOT read
@@ -29,7 +28,7 @@ fi
 oc delete secret llm-config -n "$NAMESPACE" --ignore-not-found >/dev/null
 oc create secret generic llm-config -n "$NAMESPACE" \
   --from-literal=LLM_BASE_URL="$LLM_BASE_URL" \
-  --from-literal=LLM_MODEL="$LLM_MODEL" \
+  --from-literal=LLM_MODEL="${LLM_MODEL:-}" \
   --from-literal=LLM_API_KEY="$LLM_API_KEY"
 
 # The pod reads the Secret through optional secretKeyRef env vars, so it

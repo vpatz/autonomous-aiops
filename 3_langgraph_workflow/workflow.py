@@ -427,7 +427,9 @@ def render_dashboard_shell():
     .bar { height: 8px; border-radius: 6px; background: var(--edge); overflow: hidden; }
     .bar i { display: block; height: 100%; border-radius: 6px; background: var(--accent);
              transition: width 1s ease, background .6s ease; }
-    .kv { margin: .55rem 0 .15rem; flex: 1; display: flex; flex-direction: column; }
+    .kv { margin: .55rem 0 .15rem; }
+    summary { cursor: pointer; }
+    summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .kv .label { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .22rem; }
     .sep { border: 0; border-top: 1px dashed var(--edge); margin: .85rem 0 .35rem; }
     .row { display: flex; align-items: center; gap: .55rem; margin: .5rem 0; font-size: .84rem; }
@@ -440,7 +442,7 @@ def render_dashboard_shell():
             margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
             font-size: .72rem; line-height: 1.35; flex: 1; min-height: 7.2rem; }
     .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
-    .timeline h2 { font-size: 1rem; color: var(--muted); font-weight: 600; }
+    .timeline summary { font-size: 1rem; color: var(--muted); font-weight: 600; }
     textarea.agent-output { width: 100%; resize: vertical; background: #0b1220; color: #9fb3c8;
             border: 1px solid var(--edge); border-radius: 10px; padding: .6rem .8rem;
             font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
@@ -454,10 +456,10 @@ def render_dashboard_shell():
     <div class="stats" id="stats">loading&hellip;</div>
   </header>
   <main class="grid" id="cards"></main>
-  <section class="timeline">
-    <h2>Agent output (all VMs, newest last)</h2>
-    <textarea id="agentOutput" class="messages agent-output" readonly rows="20"></textarea>
-  </section>
+  <details class="timeline">
+    <summary>Agent output (all VMs, newest last)</summary>
+    <textarea id="agentOutput" aria-label="Agent output for all VMs" class="messages agent-output" readonly rows="20"></textarea>
+  </details>
   <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
   <script>
   (function () {
@@ -615,8 +617,8 @@ def render_dashboard_shell():
       const anomalyPill = pill('muted', 'no run yet');
       const anomalyText = el('span', 'text', '');
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-      const modelWrap = el('div', 'kv');
-      const modelLabel = el('div', 'label', 'Latest anomaly detector LLM output');
+      const modelWrap = el('details', 'kv');
+      const modelLabel = el('summary', 'label', 'Latest anomaly detector LLM output');
       const modelBox = document.createElement('textarea');
       modelBox.className = 'messages';
       modelBox.readOnly = true;
@@ -638,11 +640,12 @@ def render_dashboard_shell():
       const edaChip = el('span', 'chip', 'EDA: -');
       remRow.appendChild(remText); remRow.appendChild(remWrap); remRow.appendChild(edaChip);
 
-      const msgWrap = el('div', 'kv');
-      msgWrap.appendChild(el('div', 'label', 'last 30s messages'));
+      const msgWrap = el('details', 'kv');
+      msgWrap.appendChild(el('summary', 'label', 'last 30s messages'));
       const msgBox = document.createElement('textarea');
       msgBox.className = 'messages';
       msgBox.readOnly = true;
+      msgBox.setAttribute('aria-label', 'Recent telemetry messages for ' + svc.name);
       msgBox.setAttribute('rows', '6');
       msgWrap.appendChild(msgBox);
       root.appendChild(msgWrap);
@@ -930,7 +933,7 @@ def self_check():
     from unittest.mock import patch
     history = collector.TelemetryStore()
     now = time.monotonic()
-    for age, vm in [(35, "vm-1"), (20, "vm-1"), (2, "vm-1"), (1, "vm-2")]:
+    for age, vm in [(11, "vm-1"), (9, "vm-1"), (2, "vm-1"), (1, "vm-2")]:
         history.record_metrics(collector.parse_metrics(
             collector.sample_metrics_payload(vm, {"custom.gauge": age}),
             received_at=now-age, retain=history.retain_export))
@@ -950,7 +953,9 @@ def self_check():
                                  model_results=WorkflowHandler.model_results)
         card = next(c for c in preview["services"] if c["name"] == "vm-1")
         assert card["run"] is None and card["detector_llm"]["verdict"] == {"detected": False}
-        evidence = json.loads(chat.call_args.args[0][1]["content"])["evidence"]
+        payload = json.loads(chat.call_args.args[0][1]["content"])
+        assert payload["lookback_seconds"] == 10
+        evidence = payload["evidence"]
         assert sum(k.startswith("metrics:") for k in evidence) == 2
         assert sum(k.startswith("logs:") for k in evidence) == 201
         assert sum(k.startswith("traces:") for k in evidence) == 1

@@ -25,13 +25,13 @@ stage-5 resources, run `oc delete -k 5_load_generator`.
 
 ### Run manually
 
-Run `python3 5_load_generator/load_generator.py` to repeat a 110-second cycle
+Run `python3 5_load_generator/load_generator.py` to repeat a 105-second cycle
 until you press Ctrl+C. Across all targets combined, it schedules 1 request in
 the first second, then 6, 11, and so on up to 496. It holds 500 requests per
-second for 10 seconds, then starts again at 1. Requests are spread evenly
-within each second. Use `--duration 110` for one cycle or `--rate` for a fixed rate.
+second for 5 seconds, then starts again at 1. Requests are spread evenly
+within each second. Use `--duration 105` for one cycle or `--rate` for a fixed rate.
 
-The default pool has 128 workers across all target VMs. The ramp reports `skipped` slots if all
+The default pool has 512 workers across all target VMs. The ramp reports `skipped` slots if all
 workers are busy or a slot's deadline passes. For high rates, use direct HTTP
 (`--url` with a reachable service or port-forward); the default cluster
 transport opens an SSH connection for each request.
@@ -63,7 +63,7 @@ The final partial batch is flushed on exit. Example decoded log bodies from a ba
 
 Resource attributes identify the producer (`service.name=aiops-load-generator`)
 and target (`target.vm`). The workflow includes these records in that VM's
-30-second model evidence without treating them as a VM heartbeat.
+10-second model evidence without treating them as a VM heartbeat.
 Use `--collector-url` or `OTEL_EXPORTER_OTLP_ENDPOINT` for the collector base
 URL; otherwise SSH mode discovers the workflow route and `--url` mode uses
 `http://localhost:4318`. For port-forwards, pair names and URLs in the same order:

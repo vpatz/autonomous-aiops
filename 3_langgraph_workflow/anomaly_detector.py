@@ -19,6 +19,7 @@ Verify:
 
 import argparse
 import json
+import time
 
 import llm
 import agent_tracing
@@ -135,6 +136,7 @@ def detect_window(service_name, window, silence_seconds, use_llm=True, verifying
         '"summary":"one sentence describing the scenario","evidence":["exact evidence key"]}.'
     )
     verdict = None
+    call_started = None
     try:
         if get_evidence is not None:
             evidence.update(get_evidence(service_name, since=since))
@@ -143,18 +145,21 @@ def detect_window(service_name, window, silence_seconds, use_llm=True, verifying
             evidence.update(window.get("metrics", {}))
             for key in ("metric_events", "logs", "traces"):
                 for i, record in enumerate(window.get(key, [])):
-                    if record.get("age_seconds", 0) <= 30:
+                    if record.get("age_seconds", 0) <= state.LLM_EVIDENCE_SECONDS:
                         evidence[f"{key}:{i}"] = record
         if evidence_snapshot is not None:
             evidence_snapshot.update(evidence)
-        reply = llm.chat_json([
+        messages = [
             {"role": "system", "content": instruction},
             {"role": "user", "content": json.dumps({
-                "service": service_name, "post_remediation": verifying, "lookback_seconds": 30,
+                "service": service_name, "post_remediation": verifying, "lookback_seconds": state.LLM_EVIDENCE_SECONDS,
                 "silence_threshold_seconds": silence_seconds, "rule_signals": anomaly["signals"],
                 "evidence": evidence,
             }, separators=(",", ":"))},
-        ])
+        ]
+        prompt_bytes = sum(len(msg["content"].encode()) for msg in messages)
+        call_started = time.monotonic()
+        reply = llm.chat_json(messages)
         if not isinstance(reply, dict) or type(reply.get("detected")) is not bool:
             raise ValueError("invalid verdict")
         if not reply["detected"]:
@@ -176,6 +181,11 @@ def detect_window(service_name, window, silence_seconds, use_llm=True, verifying
         print(f"[{STEP}] {service_name}: model check failed ({type(exc).__name__}); using rules", flush=True)
         return anomaly
     finally:
+        if call_started is not None:
+            result = "fallback" if verdict is None else ("anomaly" if verdict["detected"] else "healthy")
+            print(f"[{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
+                  f"prompt_bytes={prompt_bytes} elapsed_s={time.monotonic()-call_started:.2f} "
+                  f"result={result}", flush=True)
         if on_model_result is not None:
             on_model_result(service_name, verifying, verdict)
 

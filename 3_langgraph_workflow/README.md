@@ -193,7 +193,7 @@ What changes with the LLM on:
 - **anomaly detector** — the model checks observed VMs for incidents beyond
   the built-in rules, even when no rule fires. Each live detector prompt includes
   every OTLP metric, log and trace resource received from that VM in the last
-  30 seconds, in receipt order, with timestamps, attributes and all data points
+  10 seconds, in receipt order, with timestamps, attributes and all data points
   preserved in protobuf JSON. `client_logs:*` entries in the same evidence map
   are observations **about** that VM from `aiops-load-generator`: each log body
   contains one second of HTTP status counts or `no_response` outcomes. The
@@ -262,7 +262,7 @@ Environment variables (all optional; heuristics apply without an LLM):
 | --- | --- |
 | `LLM_BASE_URL` | OpenAI-compatible endpoint, including `/v1` (vLLM, EnMaaS, ...) |
 | `LLM_API_KEY` | bearer token for the endpoint |
-| `LLM_MODEL` | model name |
+| `LLM_MODEL` | optional override; defaults to `rits/deepseek-ai/DeepSeek-V4.1-Flash-1017` when an endpoint is configured |
 | `LINUX_MCP_URL` / `LINUX_MCP_COMMAND` | RCA MCP server (HTTP URL or stdio command) |
 | `ANSIBLE_MCP_URL` / `ANSIBLE_MCP_COMMAND` | remediation MCP server |
 | `MCP_INSECURE_TLS` | `1` to skip TLS verification on MCP HTTP endpoints |

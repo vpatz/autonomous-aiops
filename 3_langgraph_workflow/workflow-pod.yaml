@@ -42,6 +42,7 @@ data:
     STATUS_FAILED = "failed"
 
     DEFAULT_WINDOW_SECONDS = 120
+    LLM_EVIDENCE_SECONDS = 10
     DEFAULT_SILENCE_SECONDS = 10
     DEFAULT_MAX_ITERATIONS = 25
     DEFAULT_MAX_ATTEMPTS = 3
@@ -231,7 +232,7 @@ data:
 
         LLM_BASE_URL   e.g. https://enmaas.example.com/v1 (include /v1)
         LLM_API_KEY    bearer token (optional for local vLLM)
-        LLM_MODEL      model name served at the endpoint
+        LLM_MODEL      optional override for the default DeepSeek V4.1 Flash model
 
     Every agent falls back to deterministic heuristics when the LLM is not
     configured or a call fails, so the demo always runs.
@@ -253,6 +254,7 @@ data:
     import urllib.request
 
     STEP = "llm client"
+    DEFAULT_MODEL = "rits/deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 
     class LlmError(Exception):
@@ -263,7 +265,7 @@ data:
         return {
             "base_url": os.environ.get("LLM_BASE_URL", "").strip().rstrip("/"),
             "api_key": os.environ.get("LLM_API_KEY", "").strip(),
-            "model": os.environ.get("LLM_MODEL", "").strip(),
+            "model": os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL,
         }
 
 
@@ -294,7 +296,7 @@ data:
     def chat(messages, tools=None, temperature=0.0, max_tokens=1024):
         """One chat completion. Returns {"content": str, "tool_calls": list}."""
         if not available():
-            raise LlmError("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+            raise LlmError("LLM not configured (set LLM_BASE_URL)")
         request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
@@ -345,9 +347,11 @@ data:
 
         saved = {key: os.environ.get(key) for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")}
         os.environ["LLM_BASE_URL"] = "https://llm.example.com/v1"
-        os.environ["LLM_MODEL"] = "test-model"
         os.environ.pop("LLM_API_KEY", None)
         try:
+            os.environ.pop("LLM_MODEL", None)
+            assert config()["model"] == DEFAULT_MODEL and available()
+            os.environ["LLM_MODEL"] = "test-model"
             parsed = _extract_json('Sure! ```json\n{"detected": true, "score": 2}\n```')
             if parsed != {"detected": True, "score": 2}:
                 raise SystemExit(f"{STEP}: fenced JSON not parsed: {parsed}")
@@ -391,7 +395,7 @@ data:
         args = parser.parse_args()
         if args.probe:
             if not available():
-                raise SystemExit("LLM not configured (set LLM_BASE_URL and LLM_MODEL)")
+                raise SystemExit("LLM not configured (set LLM_BASE_URL)")
             reply = chat([{"role": "user", "content": "Reply with the single word: ok"}])
             print(f"model replied: {reply['content'][:200]}", flush=True)
             return
@@ -1083,6 +1087,7 @@ data:
     import time
     from collections import deque
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from state import LLM_EVIDENCE_SECONDS
 
     from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import (
         ExportLogsServiceRequest,
@@ -1257,7 +1262,7 @@ data:
 
         def retain_export(self, service, signal, resource, received_at):
             with self._lock:
-                cutoff = time.monotonic() - 30
+                cutoff = time.monotonic() - LLM_EVIDENCE_SECONDS
                 self._expire_exports(cutoff)
                 if received_at >= cutoff:
                     self._exports.setdefault(int(received_at), []).append(
@@ -1269,8 +1274,8 @@ data:
 
             now = time.monotonic()
             with self._lock:
-                self._expire_exports(now - 30)
-                cutoff = max(now - 30, since)
+                self._expire_exports(now - LLM_EVIDENCE_SECONDS)
+                cutoff = max(now - LLM_EVIDENCE_SECONDS, since)
                 records = [r for bucket in self._exports.values() for r in bucket
                            if r[1] == service and cutoff <= r[0] <= now]
             return {f"{signal}:{i}": {"age_seconds": round(now - at, 3),
@@ -1783,6 +1788,7 @@ data:
 
     import argparse
     import json
+    import time
 
     import llm
     import agent_tracing
@@ -1899,6 +1905,7 @@ data:
             '"summary":"one sentence describing the scenario","evidence":["exact evidence key"]}.'
         )
         verdict = None
+        call_started = None
         try:
             if get_evidence is not None:
                 evidence.update(get_evidence(service_name, since=since))
@@ -1907,18 +1914,21 @@ data:
                 evidence.update(window.get("metrics", {}))
                 for key in ("metric_events", "logs", "traces"):
                     for i, record in enumerate(window.get(key, [])):
-                        if record.get("age_seconds", 0) <= 30:
+                        if record.get("age_seconds", 0) <= state.LLM_EVIDENCE_SECONDS:
                             evidence[f"{key}:{i}"] = record
             if evidence_snapshot is not None:
                 evidence_snapshot.update(evidence)
-            reply = llm.chat_json([
+            messages = [
                 {"role": "system", "content": instruction},
                 {"role": "user", "content": json.dumps({
-                    "service": service_name, "post_remediation": verifying, "lookback_seconds": 30,
+                    "service": service_name, "post_remediation": verifying, "lookback_seconds": state.LLM_EVIDENCE_SECONDS,
                     "silence_threshold_seconds": silence_seconds, "rule_signals": anomaly["signals"],
                     "evidence": evidence,
                 }, separators=(",", ":"))},
-            ])
+            ]
+            prompt_bytes = sum(len(msg["content"].encode()) for msg in messages)
+            call_started = time.monotonic()
+            reply = llm.chat_json(messages)
             if not isinstance(reply, dict) or type(reply.get("detected")) is not bool:
                 raise ValueError("invalid verdict")
             if not reply["detected"]:
@@ -1940,6 +1950,11 @@ data:
             print(f"[{STEP}] {service_name}: model check failed ({type(exc).__name__}); using rules", flush=True)
             return anomaly
         finally:
+            if call_started is not None:
+                result = "fallback" if verdict is None else ("anomaly" if verdict["detected"] else "healthy")
+                print(f"[{STEP}] {service_name} model_call lookback_s={state.LLM_EVIDENCE_SECONDS} "
+                      f"prompt_bytes={prompt_bytes} elapsed_s={time.monotonic()-call_started:.2f} "
+                      f"result={result}", flush=True)
             if on_model_result is not None:
                 on_model_result(service_name, verifying, verdict)
 
@@ -3646,7 +3661,9 @@ data:
         .bar { height: 8px; border-radius: 6px; background: var(--edge); overflow: hidden; }
         .bar i { display: block; height: 100%; border-radius: 6px; background: var(--accent);
                  transition: width 1s ease, background .6s ease; }
-        .kv { margin: .55rem 0 .15rem; flex: 1; display: flex; flex-direction: column; }
+        .kv { margin: .55rem 0 .15rem; }
+        summary { cursor: pointer; }
+        summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
         .kv .label { color: var(--muted); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .22rem; }
         .sep { border: 0; border-top: 1px dashed var(--edge); margin: .85rem 0 .35rem; }
         .row { display: flex; align-items: center; gap: .55rem; margin: .5rem 0; font-size: .84rem; }
@@ -3659,7 +3676,7 @@ data:
                 margin-top: .25rem; font-family: ui-monospace, Menlo, monospace;
                 font-size: .72rem; line-height: 1.35; flex: 1; min-height: 7.2rem; }
         .timeline { padding: .4rem 2rem 3rem; max-width: 78rem; margin: 0 auto; }
-        .timeline h2 { font-size: 1rem; color: var(--muted); font-weight: 600; }
+        .timeline summary { font-size: 1rem; color: var(--muted); font-weight: 600; }
         textarea.agent-output { width: 100%; resize: vertical; background: #0b1220; color: #9fb3c8;
                 border: 1px solid var(--edge); border-radius: 10px; padding: .6rem .8rem;
                 font-family: ui-monospace, Menlo, monospace; font-size: .76rem;
@@ -3673,10 +3690,10 @@ data:
         <div class="stats" id="stats">loading&hellip;</div>
       </header>
       <main class="grid" id="cards"></main>
-      <section class="timeline">
-        <h2>Agent output (all VMs, newest last)</h2>
-        <textarea id="agentOutput" class="messages agent-output" readonly rows="20"></textarea>
-      </section>
+      <details class="timeline">
+        <summary>Agent output (all VMs, newest last)</summary>
+        <textarea id="agentOutput" aria-label="Agent output for all VMs" class="messages agent-output" readonly rows="20"></textarea>
+      </details>
       <noscript>This dashboard polls /api/dashboard with JavaScript.</noscript>
       <script>
       (function () {
@@ -3834,8 +3851,8 @@ data:
           const anomalyPill = pill('muted', 'no run yet');
           const anomalyText = el('span', 'text', '');
           anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-          const modelWrap = el('div', 'kv');
-          const modelLabel = el('div', 'label', 'Latest anomaly detector LLM output');
+          const modelWrap = el('details', 'kv');
+          const modelLabel = el('summary', 'label', 'Latest anomaly detector LLM output');
           const modelBox = document.createElement('textarea');
           modelBox.className = 'messages';
           modelBox.readOnly = true;
@@ -3857,11 +3874,12 @@ data:
           const edaChip = el('span', 'chip', 'EDA: -');
           remRow.appendChild(remText); remRow.appendChild(remWrap); remRow.appendChild(edaChip);
 
-          const msgWrap = el('div', 'kv');
-          msgWrap.appendChild(el('div', 'label', 'last 30s messages'));
+          const msgWrap = el('details', 'kv');
+          msgWrap.appendChild(el('summary', 'label', 'last 30s messages'));
           const msgBox = document.createElement('textarea');
           msgBox.className = 'messages';
           msgBox.readOnly = true;
+          msgBox.setAttribute('aria-label', 'Recent telemetry messages for ' + svc.name);
           msgBox.setAttribute('rows', '6');
           msgWrap.appendChild(msgBox);
           root.appendChild(msgWrap);
@@ -4149,7 +4167,7 @@ data:
         from unittest.mock import patch
         history = collector.TelemetryStore()
         now = time.monotonic()
-        for age, vm in [(35, "vm-1"), (20, "vm-1"), (2, "vm-1"), (1, "vm-2")]:
+        for age, vm in [(11, "vm-1"), (9, "vm-1"), (2, "vm-1"), (1, "vm-2")]:
             history.record_metrics(collector.parse_metrics(
                 collector.sample_metrics_payload(vm, {"custom.gauge": age}),
                 received_at=now-age, retain=history.retain_export))
@@ -4169,7 +4187,9 @@ data:
                                      model_results=WorkflowHandler.model_results)
             card = next(c for c in preview["services"] if c["name"] == "vm-1")
             assert card["run"] is None and card["detector_llm"]["verdict"] == {"detected": False}
-            evidence = json.loads(chat.call_args.args[0][1]["content"])["evidence"]
+            payload = json.loads(chat.call_args.args[0][1]["content"])
+            assert payload["lookback_seconds"] == 10
+            evidence = payload["evidence"]
             assert sum(k.startswith("metrics:") for k in evidence) == 2
             assert sum(k.startswith("logs:") for k in evidence) == 201
             assert sum(k.startswith("traces:") for k in evidence) == 1
