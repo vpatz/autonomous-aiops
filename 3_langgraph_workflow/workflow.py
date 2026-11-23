@@ -275,15 +275,21 @@ class WorkflowHandler(collector.CollectorHandler):
 
     @classmethod
     def record_model_result(cls, service, verifying, verdict, failure=None):
-        with cls.runs_lock:
+        cls.append_incident(service, "verification" if verifying else "detection", verdict, failure)
+
+    @classmethod
+    def append_incident(cls, service, phase, verdict, failure=None):
+        with cls.changed:
             entry = {
                 "at": state.utc_timestamp(),
-                "phase": "verification" if verifying else "detection",
+                "phase": phase,
                 "verdict": verdict,
                 "failure": failure,
             }
             # Replace rather than mutate so an in-progress dashboard snapshot stays stable.
             cls.model_results[service] = (*cls.model_results.get(service, ())[-99:], entry)
+            cls.revision += 1
+            cls.changed.notify_all()
 
     def do_GET(self):
         from urllib.parse import parse_qs, urlparse
@@ -379,7 +385,8 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
             incident_lines.append(" ".join(text.split()))
         services.append({
             "name": name,
-            "detector_llm": history[-1] if history else None,
+            "detector_llm": next((e for e in reversed(history)
+                                  if e["phase"] in ("detection", "verification")), None),
             "incident_lines": incident_lines,
             "vm": {
                 "status": vm_status,
@@ -664,6 +671,9 @@ def render_dashboard_shell():
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
       const model = outputPanel(root, 'Anomaly summaries (newest last)', svc.name);
       model.box.wrap = 'off';
+      model.label.parentElement.addEventListener('toggle', function () {
+        if (this.open) model.box.scrollTop = model.box.scrollHeight;
+      });
 
       const rca = outputPanel(root, 'Root cause analysis output', svc.name);
       rca.box.wrap = 'off';
@@ -677,7 +687,7 @@ def render_dashboard_shell():
       return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
                restarts: restarts, signals: signals,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
-               msgBox: messages.box, modelBox: model.box,
+               msgBox: messages.box, modelBox: model.box, modelLabel: model.label,
                rcaBox: rca.box, remedyBox: remedy.box };
     }
 
@@ -715,7 +725,10 @@ def render_dashboard_shell():
           (arg ? ' — ' + arg : '') + ` (${step.status})` + (snippet ? ': ' + snippet : ''));
       });
       const rc = run?.root_cause;
-      if (rc?.summary) lines.push(stamped(rc.at, `Diagnosis: ${rc.component || 'Unknown component'} (${rc.confidence || 'unknown'} confidence): ${rc.summary}`));
+      if (rc?.summary || rc?.diagnosis) {
+        const label = rc.component && rc.component.toLowerCase() !== 'unknown' ? rc.component : 'Cause not isolated';
+        lines.push(stamped(rc.at, 'Diagnosis: ' + (rc.diagnosis || `${label} (${rc.confidence || 'unspecified'} confidence): ${rc.summary}`)));
+      }
       if (run?.pending?.rca) lines.push(run.pending.rca);
       return lines.length ? lines.map(line => line.replace(/\s+/g, ' ').trim()).join('\n')
         : stamped(run?.updated_at, run?.status === 'running' ? 'Investigation in progress.' : 'No root cause recorded.');
@@ -740,6 +753,7 @@ def render_dashboard_shell():
     function updateCard(svc, refs) {
       const vm = svc.vm, service = svc.service;
       const summaries = svc.incident_lines.join('\n') || 'No rule-detected incident reported.';
+      refs.modelLabel.textContent = `Anomaly summaries (${svc.incident_lines.length} lines, newest last)`;
       if (refs.modelBox.value !== summaries) {
         refs.modelBox.value = summaries;
         refs.modelBox.scrollTop = refs.modelBox.scrollHeight;
@@ -911,9 +925,12 @@ def serve_forever(args):
                 trigger = anomaly_detector.analyze_window(telemetry, args.silence_seconds)
                 if not trigger["detected"]:
                     continue
-                if service_name in running:
-                    continue
-                if now - finished_at.get(service_name, -float("inf")) < args.cooldown_seconds:
+                active = service_name in running
+                cooling = now - finished_at.get(service_name, -float("inf")) < args.cooldown_seconds
+                phase = "window · investigation active" if active else (
+                    "window · cooldown" if cooling else "window · new incident")
+                WorkflowHandler.append_incident(service_name, phase, {**trigger, "source": "rules"})
+                if active or cooling:
                     continue
                 # Model latency on one VM must not stall checks on other VMs.
                 running.add(service_name)
@@ -1021,6 +1038,14 @@ def self_check():
                                  model_results=WorkflowHandler.model_results)
         lines = next(c for c in updated["services"] if c["name"] == "vm-1")["incident_lines"]
         assert lines[:-1] == card["incident_lines"] and lines[0].startswith("[")
+        revision = WorkflowHandler.revision
+        prev = WorkflowHandler.model_results["vm-1"][-1]
+        WorkflowHandler.append_incident("vm-1", "window · cooldown", prev["verdict"])
+        assert WorkflowHandler.revision == revision + 1
+        refreshed = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+                                   model_results=WorkflowHandler.model_results)
+        refreshed_card = next(c for c in refreshed["services"] if c["name"] == "vm-1")
+        assert refreshed_card["incident_lines"][:-1] == lines and refreshed_card["detector_llm"] == prev
         assert "verification · rules · low: CPU exceeded 80%." in lines[-1] and "\n" not in lines[-1]
         payload = json.loads(chat.call_args.args[0][1]["content"])
         assert payload["lookback_seconds"] == 10

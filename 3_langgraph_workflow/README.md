@@ -250,8 +250,10 @@ The dashboard header and `--self-check` output show whether the LLM is
 configured, and the findings trail names the tool the model chose at each
 iteration.
 
-Each VM card keeps the last 100 anomaly summaries since workflow startup,
-oldest first. Each response appends one plain-text line with its India Standard Time timestamp,
+Each VM card keeps the last 100 anomaly log entries since workflow startup,
+oldest first. Each flagged poll adds a rule observation immediately, including
+during investigation or cooldown. The model's response appends a separate
+line when available. Both push updates to the browser with their India Standard Time timestamp,
 phase, source (LLM or rule fallback), severity, and summary. Healthy polls add no lines.
 The detector allows 4,096 completion tokens, including model reasoning. If the
 endpoint reports an output-length cutoff before a JSON verdict is available,
