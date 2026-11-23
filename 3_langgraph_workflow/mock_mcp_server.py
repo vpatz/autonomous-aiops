@@ -5,8 +5,7 @@ Speaks MCP over stdio (newline-delimited JSON-RPC 2.0), the same protocol
 the real linux-mcp and Ansible MCP servers use.
 
 Roles:
-- linux:   pretends to be a RHEL VM where the demo service just reported a
-           dummy-crash fault (process still running, error state set)
+- linux:   pretends to be a RHEL VM where the demo service was killed
 - ansible: pretends to be an Ansible MCP server with an approved-command
            allowlist, and remembers when the service was restarted
 
@@ -144,10 +143,7 @@ def linux_call(name, arguments):
                 "Created symlink /etc/systemd/system/multi-user.target.wants/aiops-demo.service\n"
             )
         if path in ("/var/log/messages", "/var/log/secure"):
-            return (
-                "Nov 17 10:12:14 rhel10-service-1 python3[2841]: service app sent dummy-crash event\n"
-                "Nov 17 10:12:14 rhel10-service-1 python3[2841]: ERROR: service app simulated a dummy crash\n"
-            )
+            return _journalctl()
         return f"[mock] file not found: {path}"
     raise ValueError(f"unknown linux tool {name}")
 

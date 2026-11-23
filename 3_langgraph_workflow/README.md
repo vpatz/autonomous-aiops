@@ -206,7 +206,7 @@ VM and 5 seconds between starts across VMs.
   received after the action. There is no record cap or prompt truncation: if
   the window exceeds the model's context limit, detection falls back to rules.
   The rule engine uses its configured workflow window and latest host gauges.
-  CPU and memory trigger independently at strictly greater than 50% utilization.
+  CPU and memory trigger independently at strictly greater than 80% utilization.
 - **root cause analyzer (inner loop)** — RCA receives the detector's exact
   per-VM evidence snapshot, including guest OTLP and load-generator outcomes.
   Evidence keys remain stable even if the collector's rolling window advances
@@ -227,9 +227,9 @@ The dashboard header and `--self-check` output show whether the LLM is
 configured, and the findings trail names the tool the model chose at each
 iteration.
 
-Each VM card shows the latest rule-detected incident summary as JSON, labeled
-with its UTC timestamp and whether it came from detection or verification.
-Healthy polls skip the LLM and preserve the last incident summary.
+Each VM card keeps the last 100 anomaly summaries since workflow startup,
+oldest first. Each response appends one plain-text line with its UTC timestamp,
+phase, source (LLM or rule fallback), severity, and summary. Healthy polls add no lines.
 The detector allows 4,096 completion tokens, including model reasoning. If the
 endpoint reports an output-length cutoff before a JSON verdict is available,
 it retries the same snapshot once with 8,192 tokens. Other failures go directly
@@ -281,7 +281,7 @@ budget), `--cooldown-seconds`, `--verify-wait-seconds`.
 ## Agents and safety
 
 - **anomaly_detector** (agent 1): deterministic triggers over the telemetry
-  window (silence, ERROR logs, failed spans, dummy-crash counter, CPU/memory
+  window (silence, ERROR logs, failed spans, impossible zero readings, CPU/memory
   load). The model cannot add or clear a trigger. An unavailable model or
   invalid summary falls back to the rule explanation.
 - **root_cause_analyzer** (agent 2): the inner loop. With an LLM, each

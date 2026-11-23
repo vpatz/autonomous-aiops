@@ -125,15 +125,7 @@ def _conclude(investigation):
             "evidence": [truncate(item.get("output", ""), 200) for item in evidence],
             "confidence": "high",
         }
-    if "dummy crash" in text or "dummy-crash" in text:
-        summary = (
-            f"The application reported a dummy-crash fault (ERROR log, failed span, "
-            f"dummy-crash metric). The process is still running but is in an error "
-            f"state that persists until {SERVICE_UNIT} is restarted."
-        )
-        component = SERVICE_UNIT
-        confidence = "high"
-    elif "cpu" in text and "load average" in text:
+    if "cpu" in text and "load average" in text:
         summary = "Host resource saturation is degrading the service."
         component = "host"
         confidence = "medium"
@@ -355,19 +347,19 @@ def self_check():
     if len(budget_calls) != 1:
         raise SystemExit(f"{STEP}: budget of 1 should allow exactly one tool call, got {len(budget_calls)}")
 
-    # A dead unit outranks stale dummy-crash lines in journal history.
+    # A dead unit outranks older host-load evidence.
     mixed = _conclude([
         {"status": "ok",
          "output": "Active: failed (Result: exit-code); Main PID: 2841 (code=killed, status=9/KILL)"},
-        {"status": "ok", "output": "python3[2841]: service app sent dummy-crash event"},
+        {"status": "ok", "output": "CPU load average: 3.5"},
     ])
     if "not running" not in mixed["summary"] or mixed["component"] != SERVICE_UNIT:
         raise SystemExit(f"{STEP}: dead unit must outrank stale journal history: {mixed}")
     running = _conclude([
         {"status": "ok", "output": "Active: active (running) since Fri 2026-11-20 10:31:02 UTC"},
-        {"status": "ok", "output": "python3[2841]: ERROR: service app simulated a dummy crash"},
+        {"status": "ok", "output": "python3[2841]: ERROR: request failed"},
     ])
-    if "dummy-crash" not in running["summary"]:
+    if running["confidence"] != "low":
         raise SystemExit(f"{STEP}: running service with fault evidence misattributed: {running}")
 
     # The LLM prompt must ground the model in the real host and unit names.

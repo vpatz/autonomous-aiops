@@ -809,8 +809,7 @@ data:
     the real linux-mcp and Ansible MCP servers use.
 
     Roles:
-    - linux:   pretends to be a RHEL VM where the demo service just reported a
-               dummy-crash fault (process still running, error state set)
+    - linux:   pretends to be a RHEL VM where the demo service was killed
     - ansible: pretends to be an Ansible MCP server with an approved-command
                allowlist, and remembers when the service was restarted
 
@@ -948,10 +947,7 @@ data:
                     "Created symlink /etc/systemd/system/multi-user.target.wants/aiops-demo.service\n"
                 )
             if path in ("/var/log/messages", "/var/log/secure"):
-                return (
-                    "Nov 17 10:12:14 rhel10-service-1 python3[2841]: service app sent dummy-crash event\n"
-                    "Nov 17 10:12:14 rhel10-service-1 python3[2841]: ERROR: service app simulated a dummy crash\n"
-                )
+                return _journalctl()
             return f"[mock] file not found: {path}"
         raise ValueError(f"unknown linux tool {name}")
 
@@ -1151,10 +1147,6 @@ data:
     LISTEN_PORT = 4318
     ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR, 18..24 = ERROR2..FATAL
     MAX_PER_SIGNAL = 200
-    # Metrics whose increases are recorded as fault events. OTel counters are
-    # cumulative, so "dummy-crash is present" is not a fault signal — the fault
-    # is the increment. A restart resets the counter and clears the fault.
-    EVENT_METRICS = ("dummy-crash",)
     # Metrics whose decreases indicate the emitting process restarted
     # (a fresh service.uptime below the previous sample).
     RESTART_METRICS = ("service.uptime",)
@@ -1373,14 +1365,7 @@ data:
                     for name, value in metrics.items():
                         previous = entry["metrics"].get(name, {}).get("value")
                         entry["metrics"][name] = {"value": value, "at": received_at}
-                        if name in EVENT_METRICS:
-                            increased = value > previous if previous is not None else value > 0
-                            if increased:
-                                entry["metric_events"].append(
-                                    {"metric": name, "from": previous or 0, "to": value,
-                                     "at": received_at, "kind": "increment"}
-                                )
-                        elif name in RESTART_METRICS and previous is not None and value < previous:
+                        if name in RESTART_METRICS and previous is not None and value < previous:
                             entry["metric_events"].append(
                                 {"metric": name, "from": previous, "to": value,
                                  "at": received_at, "kind": "restart"}
@@ -1461,7 +1446,7 @@ data:
                         "metric": item["metric"],
                         "from": item["from"],
                         "to": item["to"],
-                        "kind": item.get("kind", "increment"),
+                        "kind": item["kind"],
                         "age_seconds": round(now - item["at"], 1),
                     }
                     for item in entry["metric_events"]
@@ -1517,7 +1502,7 @@ data:
         return request.SerializeToString()
 
 
-    def sample_logs_payload(service_name="self-check", body="simulated a dummy crash"):
+    def sample_logs_payload(service_name="self-check", body="request failed"):
         request = ExportLogsServiceRequest()
         resource_logs = request.resource_logs.add()
         attribute = resource_logs.resource.attributes.add()
@@ -1530,7 +1515,7 @@ data:
         return request.SerializeToString()
 
 
-    def sample_traces_payload(service_name="self-check", span_name="dummy-crash"):
+    def sample_traces_payload(service_name="self-check", span_name="GET /"):
         request = ExportTraceServiceRequest()
         resource_spans = request.resource_spans.add()
         attribute = resource_spans.resource.attributes.add()
@@ -1539,7 +1524,7 @@ data:
         span = resource_spans.scope_spans.add().spans.add()
         span.name = span_name
         span.status.code = 2  # ERROR
-        span.status.message = "dummy crash"
+        span.status.message = "request failed"
         span.start_time_unix_nano = 1_000_000_000
         span.end_time_unix_nano = 1_005_000_000
         return request.SerializeToString()
@@ -1712,20 +1697,11 @@ data:
         store.record_metrics(metrics)
         store.record_logs(parse_logs(sample_logs_payload("vm-1"), received_at=now - 30))
         store.record_traces(parse_traces(sample_traces_payload("vm-1"), received_at=now - 30))
-        # Counter increments: the fault event is the increase, not the presence.
         store.record_metrics(parse_metrics(
-            sample_metrics_payload("vm-1", {"dummy-crash": 0}), received_at=now - 25))
-        store.record_metrics(parse_metrics(
-            sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 26.0}), received_at=now - 20))
-        store.record_metrics(parse_metrics(
-            sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 31.0}), received_at=now - 10))
+            sample_metrics_payload("vm-1", {"service.uptime": 31.0}), received_at=now - 10))
         window = store.window("vm-1", 60)
         if not window["ever_seen"] or window["metrics"].get("service.uptime") != 31.0:
             raise SystemExit(f"{STEP}: window missing latest metrics {window}")
-        if len(window["metric_events"]) != 1 or window["metric_events"][0]["to"] != 1:
-            raise SystemExit(f"{STEP}: dummy-crash increment not recorded {window['metric_events']}")
-        if window["metrics"].get("dummy-crash") != 1:
-            raise SystemExit(f"{STEP}: raw counter value missing {window['metrics']}")
         if len(window["logs"]) != 1 or window["logs"][0]["severity_number"] != 17:
             raise SystemExit(f"{STEP}: window missing log {window['logs']}")
         if len(window["traces"]) != 1 or window["traces"][0]["status_code"] != 2:
@@ -1743,18 +1719,11 @@ data:
         fresh = store.window("vm-1", 60, since=since)
         if fresh["logs"] or fresh["traces"] or fresh["metric_events"]:
             raise SystemExit(f"{STEP}: since filter should drop pre-since records {fresh}")
-        if fresh["metrics"].get("dummy-crash") is None:
+        if fresh["metrics"].get("service.uptime") != 31.0:
             raise SystemExit(f"{STEP}: since filter kept wrong metrics {fresh['metrics']}")
         unknown = store.window("never-seen", 60)
         if unknown["ever_seen"] or unknown["last_seen_seconds_ago"] is not None:
             raise SystemExit(f"{STEP}: unknown service window wrong {unknown}")
-        # First observation of a nonzero counter counts as an increment
-        # (collector restarted after the fault fired).
-        store2 = TelemetryStore()
-        store2.record_metrics(parse_metrics(
-            sample_metrics_payload("vm-2", {"dummy-crash": 1}), received_at=time.monotonic()))
-        if len(store2.window("vm-2", 60)["metric_events"]) != 1:
-            raise SystemExit(f"{STEP}: first nonzero observation should be an event")
         # A decreasing service.uptime means the emitting process restarted.
         store.record_metrics(parse_metrics(
             sample_metrics_payload("vm-1", {"service.uptime": 100.0}), received_at=now - 8))
@@ -1773,7 +1742,7 @@ data:
             raise SystemExit(f"{STEP}: metrics message missing: {msgs[:3]}")
         if not any(m["text"].startswith("log ERROR:") for m in msgs):
             raise SystemExit(f"{STEP}: log message missing: {msgs[:3]}")
-        if not any(m["text"].startswith("span dummy-crash:") and "status=error" in m["text"]
+        if not any(m["text"].startswith("span GET /:") and "status=error" in m["text"]
                    for m in msgs):
             raise SystemExit(f"{STEP}: span message missing: {msgs[:3]}")
         if any("otel.sdk" in m["text"] for m in msgs):
@@ -1820,7 +1789,6 @@ data:
 
     Triggers:
     - metrics-silent:      the service was seen but stopped sending telemetry
-    - dummy-crash-metric:  the demo fault counter incremented
     - error-logs:          OTel log records at ERROR severity or higher
     - failed-spans:        trace spans with ERROR status
     - cpu-saturation / memory-pressure: host gauges above threshold
@@ -1840,8 +1808,8 @@ data:
 
     STEP = "agent 1 anomaly detector"
     MODEL_OUTPUT_TOKENS = 4096
-    CPU_THRESHOLD_PERCENT = 50.0
-    MEMORY_THRESHOLD_PERCENT = 50.0
+    CPU_THRESHOLD_PERCENT = 80.0
+    MEMORY_THRESHOLD_PERCENT = 80.0
     ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR and above
 
 
@@ -1867,18 +1835,6 @@ data:
         if window.get("ever_seen") and last_seen is not None and last_seen > silence_seconds:
             signals.append("metrics-silent")
             reasons.append(f"no telemetry for {last_seen:.0f}s (silence threshold {silence_seconds:.0f}s)")
-        events = window.get("metric_events")
-        if events is not None:
-            # OTel counters are cumulative: the fault signal is the increment
-            # inside the window, not the counter's presence. A restart that
-            # clears the fault produces no further increments.
-            crash_events = [item for item in events if item.get("metric") == "dummy-crash"]
-            if crash_events:
-                signals.append("dummy-crash-metric")
-                reasons.append(f"dummy-crash counter incremented to {crash_events[-1].get('to')}")
-        elif metrics.get("dummy-crash", 0) > 0:
-            signals.append("dummy-crash-metric")
-            reasons.append(f"dummy-crash counter at {metrics.get('dummy-crash')}")
         error_logs = [entry for entry in logs if _is_error_log(entry)]
         if error_logs:
             signals.append("error-logs")
@@ -2071,45 +2027,19 @@ data:
         crashed = {
             "ever_seen": True,
             "last_seen_seconds_ago": 3.0,
-            "metrics": {"service.uptime": 187.0, "dummy-crash": 1},
-            "metric_events": [{"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}],
+            "metrics": {"service.uptime": 187.0},
             "logs": [
-                {"severity_number": 17, "severity_text": "ERROR", "body": "simulated a dummy crash"},
+                {"severity_number": 17, "severity_text": "ERROR", "body": "request failed"},
                 {"severity_number": 9, "severity_text": "INFO", "body": "page served"},
             ],
-            "traces": [{"name": "dummy-crash", "status_code": 2, "status_message": "dummy crash"}],
+            "traces": [{"name": "GET /", "status_code": 2, "status_message": "request failed"}],
         }
         anomaly = analyze_window(crashed)
-        for expected in ("dummy-crash-metric", "error-logs", "failed-spans"):
+        for expected in ("error-logs", "failed-spans"):
             if expected not in anomaly["signals"]:
                 raise SystemExit(f"{STEP}: missing signal {expected} in {anomaly['signals']}")
-        if not anomaly["detected"] or anomaly["severity"] != "high":
-            raise SystemExit(f"{STEP}: crash window not flagged high {anomaly}")
-
-        # Post-remediation shape: the counter is still present (cumulative) but
-        # no increment happened inside the window -> no fault signal.
-        cleared = {
-            "ever_seen": True,
-            "last_seen_seconds_ago": 1.0,
-            "metrics": {"service.uptime": 12.0, "dummy-crash": 1},
-            "metric_events": [],
-            "logs": [],
-            "traces": [],
-        }
-        anomaly = analyze_window(cleared)
-        if anomaly["detected"]:
-            raise SystemExit(f"{STEP}: cleared window must not flag the stale counter {anomaly}")
-
-        # Windows without metric_events (synthetic shapes) fall back to the raw value.
-        legacy = {
-            "ever_seen": True,
-            "last_seen_seconds_ago": 2.0,
-            "metrics": {"dummy-crash": 1},
-            "logs": [],
-            "traces": [],
-        }
-        if "dummy-crash-metric" not in analyze_window(legacy)["signals"]:
-            raise SystemExit(f"{STEP}: legacy raw-value window should flag the counter")
+        if not anomaly["detected"] or anomaly["severity"] != "medium":
+            raise SystemExit(f"{STEP}: expected two signals with medium severity: {anomaly}")
 
         silent = {"ever_seen": True, "last_seen_seconds_ago": 42.0, "metrics": {}, "logs": [], "traces": []}
         anomaly = analyze_window(silent)
@@ -2171,14 +2101,14 @@ data:
             raise SystemExit(f"{STEP}: exhausted attempts should fail, got {result}")
         from unittest.mock import patch
         with patch.object(llm, "available", return_value=True), patch.object(llm, "chat_json") as chat:
-            boundary = {**healthy, "metrics": {"service.cpu.load": 50, "service.memory.load": 50}}
+            boundary = {**healthy, "metrics": {"service.cpu.load": 80, "service.memory.load": 80}}
             model_node = build_node()
             for sample in (healthy, unknown, boundary):
                 assert model_node(state.initial_state("vm-1", telemetry=sample)).goto == "__end__"
             chat.assert_not_called()
-            chat.return_value = {"summary": "Resource usage exceeds 50%.", "detected": False}
+            chat.return_value = {"summary": "Resource usage exceeds 80%.", "detected": False}
             for metric, signal in (("service.cpu.load", "cpu-saturation"), ("service.memory.load", "memory-pressure")):
-                sample = {**healthy, "metrics": {metric: 50.1}}
+                sample = {**healthy, "metrics": {metric: 80.1}}
                 result = model_node(state.initial_state("vm-1", telemetry=sample))
                 assert result.goto == state.NODE_RCA
                 assert result.update["anomaly"] == {**analyze_window(sample), "summary": chat.return_value["summary"]}
@@ -2341,15 +2271,7 @@ data:
                 "evidence": [truncate(item.get("output", ""), 200) for item in evidence],
                 "confidence": "high",
             }
-        if "dummy crash" in text or "dummy-crash" in text:
-            summary = (
-                f"The application reported a dummy-crash fault (ERROR log, failed span, "
-                f"dummy-crash metric). The process is still running but is in an error "
-                f"state that persists until {SERVICE_UNIT} is restarted."
-            )
-            component = SERVICE_UNIT
-            confidence = "high"
-        elif "cpu" in text and "load average" in text:
+        if "cpu" in text and "load average" in text:
             summary = "Host resource saturation is degrading the service."
             component = "host"
             confidence = "medium"
@@ -2571,19 +2493,19 @@ data:
         if len(budget_calls) != 1:
             raise SystemExit(f"{STEP}: budget of 1 should allow exactly one tool call, got {len(budget_calls)}")
 
-        # A dead unit outranks stale dummy-crash lines in journal history.
+        # A dead unit outranks older host-load evidence.
         mixed = _conclude([
             {"status": "ok",
              "output": "Active: failed (Result: exit-code); Main PID: 2841 (code=killed, status=9/KILL)"},
-            {"status": "ok", "output": "python3[2841]: service app sent dummy-crash event"},
+            {"status": "ok", "output": "CPU load average: 3.5"},
         ])
         if "not running" not in mixed["summary"] or mixed["component"] != SERVICE_UNIT:
             raise SystemExit(f"{STEP}: dead unit must outrank stale journal history: {mixed}")
         running = _conclude([
             {"status": "ok", "output": "Active: active (running) since Fri 2026-11-20 10:31:02 UTC"},
-            {"status": "ok", "output": "python3[2841]: ERROR: service app simulated a dummy crash"},
+            {"status": "ok", "output": "python3[2841]: ERROR: request failed"},
         ])
-        if "dummy-crash" not in running["summary"]:
+        if running["confidence"] != "low":
             raise SystemExit(f"{STEP}: running service with fault evidence misattributed: {running}")
 
         # The LLM prompt must ground the model in the real host and unit names.
@@ -2943,7 +2865,7 @@ data:
         root_cause = {
             "found": True,
             "component": SERVICE_UNIT,
-            "summary": "dummy-crash fault state persists until restart",
+            "summary": "The systemd unit is not running",
             "confidence": "high",
         }
         workflow_state = state.initial_state("vm-1")
@@ -3532,17 +3454,19 @@ data:
 
         runs = {}  # service_name -> latest final state (or {"running": True})
         runs_lock = threading.Lock()
-        model_results = {}  # latest flagged incident per VM; healthy polls leave this intact
+        model_results = {}  # per-VM incident history, oldest first; healthy polls do not append
 
         @classmethod
         def record_model_result(cls, service, verifying, verdict, failure=None):
             with cls.runs_lock:
-                cls.model_results[service] = {
+                entry = {
                     "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "phase": "verification" if verifying else "detection",
                     "verdict": verdict,
                     "failure": failure,
                 }
+                # Replace rather than mutate so an in-progress dashboard snapshot stays stable.
+                cls.model_results[service] = (*cls.model_results.get(service, ())[-99:], entry)
 
         def do_GET(self):
             from urllib.parse import parse_qs, urlparse
@@ -3624,9 +3548,19 @@ data:
                     "max_attempts": run.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS),
                     "investigation_steps": len(run.get("investigation", [])),
                 }
+            history = results_snapshot.get(name, ())
+            incident_lines = []
+            for entry in history:
+                verdict = entry["verdict"]
+                source = "LLM" if verdict["source"] == "llm" else "rules"
+                text = f"[{entry['at']}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
+                if entry["failure"]:
+                    text += f" (model error: {entry['failure']})"
+                incident_lines.append(" ".join(text.split()))
             services.append({
                 "name": name,
-                "detector_llm": results_snapshot.get(name),
+                "detector_llm": history[-1] if history else None,
+                "incident_lines": incident_lines,
                 "vm": {
                     "status": vm_status,
                     "last_seen_seconds_ago": last_seen,
@@ -3643,7 +3577,6 @@ data:
                     "memory": metrics.get("service.memory.load"),
                     "active_requests": metrics.get("service.requests.active"),
                     "peak_requests": store.peak_requests(name),
-                    "fault": metrics.get("dummy-crash", 0),
                 },
                 "run": run_view,
             })
@@ -3911,7 +3844,6 @@ data:
           const uptime = sideStat(side, 'process uptime');
           const restarts = sideStat(side, 'restarts 10m');
           const signals = sideStat(side, 'm / l / t');
-          const fault = sideStat(side, 'fault flag');
           dials.appendChild(side);
           root.appendChild(dials);
 
@@ -3921,7 +3853,8 @@ data:
           const anomalyPill = pill('muted', 'no run yet');
           const anomalyText = el('span', 'text', '');
           anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-          const model = outputPanel(root, 'Latest rule-detected incident', svc.name);
+          const model = outputPanel(root, 'Anomaly summaries (newest last)', svc.name);
+          model.box.wrap = 'off';
 
           const rca = outputPanel(root, 'Root cause analysis output', svc.name);
 
@@ -3931,9 +3864,9 @@ data:
 
           cardsRoot.appendChild(root);
           return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
-                   restarts: restarts, signals: signals, fault: fault,
+                   restarts: restarts, signals: signals,
                    anomalyPill: anomalyPill, anomalyText: anomalyText,
-                   msgBox: messages.box, modelBox: model.box, modelLabel: model.label,
+                   msgBox: messages.box, modelBox: model.box,
                    rcaBox: rca.box, remedyBox: remedy.box };
         }
 
@@ -3945,11 +3878,11 @@ data:
 
         function updateCard(svc, refs) {
           const vm = svc.vm, service = svc.service;
-          const call = svc.detector_llm;
-          refs.modelLabel.textContent = 'Latest rule-detected incident' +
-            (call ? ' · ' + call.phase + ' · ' + call.at : '');
-          refs.modelBox.value = call ? JSON.stringify(call.failure ? {...call.verdict, model_error: call.failure}
-            : call.verdict, null, 2) : 'No rule-detected incident reported.';
+          const summaries = svc.incident_lines.join('\n') || 'No rule-detected incident reported.';
+          if (refs.modelBox.value !== summaries) {
+            refs.modelBox.value = summaries;
+            refs.modelBox.scrollTop = refs.modelBox.scrollHeight;
+          }
           // VM status is color-coded on the card itself; cards are never
           // removed for a down VM, so the last known state stays visible.
           refs.root.className = 'card vm-' + vm.status;
@@ -3970,8 +3903,6 @@ data:
           refs.uptime.textContent = fmtDuration(service.uptime);
           refs.restarts.textContent = String(service.restarts);
           refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
-          refs.fault.textContent = service.fault > 0 ? String(service.fault) : 'clear';
-          refs.fault.style.color = service.fault > 0 ? 'var(--bad)' : 'var(--ok)';
 
           // Message feed: updated on every poll, regardless of run state.
           const lines = (svc.messages || []).map(function (m) {
@@ -4222,6 +4153,13 @@ data:
                                      model_results=WorkflowHandler.model_results)
             card = next(c for c in preview["services"] if c["name"] == "vm-1")
             assert card["run"] is None and card["detector_llm"]["verdict"]["summary"] == "Error logs were received."
+            WorkflowHandler.record_model_result("vm-1", True, {
+                "source": "rules", "severity": "low", "summary": "CPU exceeded\n80%."}, "model unavailable")
+            updated = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+                                     model_results=WorkflowHandler.model_results)
+            lines = next(c for c in updated["services"] if c["name"] == "vm-1")["incident_lines"]
+            assert lines[:-1] == card["incident_lines"] and lines[0].startswith("[")
+            assert "verification · rules · low: CPU exceeded 80%." in lines[-1] and "\n" not in lines[-1]
             payload = json.loads(chat.call_args.args[0][1]["content"])
             assert payload["lookback_seconds"] == 10
             evidence = payload["evidence"]
@@ -4237,7 +4175,7 @@ data:
         store.record_metrics(collector.parse_metrics(
             collector.sample_metrics_payload(
                 "vm-1", {"service.uptime": 42.0, "service.cpu.load": 3.0,
-                         "service.memory.load": 12.0, "service.requests.active": 7, "dummy-crash": 1}),
+                         "service.memory.load": 12.0, "service.requests.active": 7}),
             received_at=now - 2))
         run = state.initial_state("vm-1", telemetry={})
         run.update({
@@ -4260,11 +4198,9 @@ data:
         service = by_name["vm-1"]
         if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
             raise SystemExit(f"{STEP}: dashboard data vm view wrong: {service['vm']}")
-        if (service["vm"]["metrics"] < 5 or service["service"]["cpu"] != 3.0
+        if (service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0
                 or service["service"]["active_requests"] != 7):
             raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
-        if service["service"]["fault"] != 1:
-            raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
         # A VM the cluster reports as stopped keeps its card, marked down.
         if "vm-2" not in by_name or by_name["vm-2"]["vm"]["status"] != "down":
             raise SystemExit(f"{STEP}: stopped VM must keep a card with status down: {data['services']}")

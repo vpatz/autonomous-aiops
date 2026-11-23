@@ -48,10 +48,6 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 4318
 ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR, 18..24 = ERROR2..FATAL
 MAX_PER_SIGNAL = 200
-# Metrics whose increases are recorded as fault events. OTel counters are
-# cumulative, so "dummy-crash is present" is not a fault signal — the fault
-# is the increment. A restart resets the counter and clears the fault.
-EVENT_METRICS = ("dummy-crash",)
 # Metrics whose decreases indicate the emitting process restarted
 # (a fresh service.uptime below the previous sample).
 RESTART_METRICS = ("service.uptime",)
@@ -270,14 +266,7 @@ class TelemetryStore:
                 for name, value in metrics.items():
                     previous = entry["metrics"].get(name, {}).get("value")
                     entry["metrics"][name] = {"value": value, "at": received_at}
-                    if name in EVENT_METRICS:
-                        increased = value > previous if previous is not None else value > 0
-                        if increased:
-                            entry["metric_events"].append(
-                                {"metric": name, "from": previous or 0, "to": value,
-                                 "at": received_at, "kind": "increment"}
-                            )
-                    elif name in RESTART_METRICS and previous is not None and value < previous:
+                    if name in RESTART_METRICS and previous is not None and value < previous:
                         entry["metric_events"].append(
                             {"metric": name, "from": previous, "to": value,
                              "at": received_at, "kind": "restart"}
@@ -358,7 +347,7 @@ class TelemetryStore:
                     "metric": item["metric"],
                     "from": item["from"],
                     "to": item["to"],
-                    "kind": item.get("kind", "increment"),
+                    "kind": item["kind"],
                     "age_seconds": round(now - item["at"], 1),
                 }
                 for item in entry["metric_events"]
@@ -414,7 +403,7 @@ def sample_metrics_payload(service_name="self-check", extra_metrics=None):
     return request.SerializeToString()
 
 
-def sample_logs_payload(service_name="self-check", body="simulated a dummy crash"):
+def sample_logs_payload(service_name="self-check", body="request failed"):
     request = ExportLogsServiceRequest()
     resource_logs = request.resource_logs.add()
     attribute = resource_logs.resource.attributes.add()
@@ -427,7 +416,7 @@ def sample_logs_payload(service_name="self-check", body="simulated a dummy crash
     return request.SerializeToString()
 
 
-def sample_traces_payload(service_name="self-check", span_name="dummy-crash"):
+def sample_traces_payload(service_name="self-check", span_name="GET /"):
     request = ExportTraceServiceRequest()
     resource_spans = request.resource_spans.add()
     attribute = resource_spans.resource.attributes.add()
@@ -436,7 +425,7 @@ def sample_traces_payload(service_name="self-check", span_name="dummy-crash"):
     span = resource_spans.scope_spans.add().spans.add()
     span.name = span_name
     span.status.code = 2  # ERROR
-    span.status.message = "dummy crash"
+    span.status.message = "request failed"
     span.start_time_unix_nano = 1_000_000_000
     span.end_time_unix_nano = 1_005_000_000
     return request.SerializeToString()
@@ -609,20 +598,11 @@ def self_check():
     store.record_metrics(metrics)
     store.record_logs(parse_logs(sample_logs_payload("vm-1"), received_at=now - 30))
     store.record_traces(parse_traces(sample_traces_payload("vm-1"), received_at=now - 30))
-    # Counter increments: the fault event is the increase, not the presence.
     store.record_metrics(parse_metrics(
-        sample_metrics_payload("vm-1", {"dummy-crash": 0}), received_at=now - 25))
-    store.record_metrics(parse_metrics(
-        sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 26.0}), received_at=now - 20))
-    store.record_metrics(parse_metrics(
-        sample_metrics_payload("vm-1", {"dummy-crash": 1, "service.uptime": 31.0}), received_at=now - 10))
+        sample_metrics_payload("vm-1", {"service.uptime": 31.0}), received_at=now - 10))
     window = store.window("vm-1", 60)
     if not window["ever_seen"] or window["metrics"].get("service.uptime") != 31.0:
         raise SystemExit(f"{STEP}: window missing latest metrics {window}")
-    if len(window["metric_events"]) != 1 or window["metric_events"][0]["to"] != 1:
-        raise SystemExit(f"{STEP}: dummy-crash increment not recorded {window['metric_events']}")
-    if window["metrics"].get("dummy-crash") != 1:
-        raise SystemExit(f"{STEP}: raw counter value missing {window['metrics']}")
     if len(window["logs"]) != 1 or window["logs"][0]["severity_number"] != 17:
         raise SystemExit(f"{STEP}: window missing log {window['logs']}")
     if len(window["traces"]) != 1 or window["traces"][0]["status_code"] != 2:
@@ -640,18 +620,11 @@ def self_check():
     fresh = store.window("vm-1", 60, since=since)
     if fresh["logs"] or fresh["traces"] or fresh["metric_events"]:
         raise SystemExit(f"{STEP}: since filter should drop pre-since records {fresh}")
-    if fresh["metrics"].get("dummy-crash") is None:
+    if fresh["metrics"].get("service.uptime") != 31.0:
         raise SystemExit(f"{STEP}: since filter kept wrong metrics {fresh['metrics']}")
     unknown = store.window("never-seen", 60)
     if unknown["ever_seen"] or unknown["last_seen_seconds_ago"] is not None:
         raise SystemExit(f"{STEP}: unknown service window wrong {unknown}")
-    # First observation of a nonzero counter counts as an increment
-    # (collector restarted after the fault fired).
-    store2 = TelemetryStore()
-    store2.record_metrics(parse_metrics(
-        sample_metrics_payload("vm-2", {"dummy-crash": 1}), received_at=time.monotonic()))
-    if len(store2.window("vm-2", 60)["metric_events"]) != 1:
-        raise SystemExit(f"{STEP}: first nonzero observation should be an event")
     # A decreasing service.uptime means the emitting process restarted.
     store.record_metrics(parse_metrics(
         sample_metrics_payload("vm-1", {"service.uptime": 100.0}), received_at=now - 8))
@@ -670,7 +643,7 @@ def self_check():
         raise SystemExit(f"{STEP}: metrics message missing: {msgs[:3]}")
     if not any(m["text"].startswith("log ERROR:") for m in msgs):
         raise SystemExit(f"{STEP}: log message missing: {msgs[:3]}")
-    if not any(m["text"].startswith("span dummy-crash:") and "status=error" in m["text"]
+    if not any(m["text"].startswith("span GET /:") and "status=error" in m["text"]
                for m in msgs):
         raise SystemExit(f"{STEP}: span message missing: {msgs[:3]}")
     if any("otel.sdk" in m["text"] for m in msgs):

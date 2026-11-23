@@ -7,7 +7,6 @@ summarizes flagged windows without changing the rule decision.
 
 Triggers:
 - metrics-silent:      the service was seen but stopped sending telemetry
-- dummy-crash-metric:  the demo fault counter incremented
 - error-logs:          OTel log records at ERROR severity or higher
 - failed-spans:        trace spans with ERROR status
 - cpu-saturation / memory-pressure: host gauges above threshold
@@ -27,8 +26,8 @@ import state
 
 STEP = "agent 1 anomaly detector"
 MODEL_OUTPUT_TOKENS = 4096
-CPU_THRESHOLD_PERCENT = 50.0
-MEMORY_THRESHOLD_PERCENT = 50.0
+CPU_THRESHOLD_PERCENT = 80.0
+MEMORY_THRESHOLD_PERCENT = 80.0
 ERROR_SEVERITY_NUMBER = 17  # OTel SeverityNumbers: 17=ERROR and above
 
 
@@ -54,18 +53,6 @@ def analyze_window(window, silence_seconds=state.DEFAULT_SILENCE_SECONDS):
     if window.get("ever_seen") and last_seen is not None and last_seen > silence_seconds:
         signals.append("metrics-silent")
         reasons.append(f"no telemetry for {last_seen:.0f}s (silence threshold {silence_seconds:.0f}s)")
-    events = window.get("metric_events")
-    if events is not None:
-        # OTel counters are cumulative: the fault signal is the increment
-        # inside the window, not the counter's presence. A restart that
-        # clears the fault produces no further increments.
-        crash_events = [item for item in events if item.get("metric") == "dummy-crash"]
-        if crash_events:
-            signals.append("dummy-crash-metric")
-            reasons.append(f"dummy-crash counter incremented to {crash_events[-1].get('to')}")
-    elif metrics.get("dummy-crash", 0) > 0:
-        signals.append("dummy-crash-metric")
-        reasons.append(f"dummy-crash counter at {metrics.get('dummy-crash')}")
     error_logs = [entry for entry in logs if _is_error_log(entry)]
     if error_logs:
         signals.append("error-logs")
@@ -258,45 +245,19 @@ def self_check():
     crashed = {
         "ever_seen": True,
         "last_seen_seconds_ago": 3.0,
-        "metrics": {"service.uptime": 187.0, "dummy-crash": 1},
-        "metric_events": [{"metric": "dummy-crash", "from": 0, "to": 1, "age_seconds": 3.0}],
+        "metrics": {"service.uptime": 187.0},
         "logs": [
-            {"severity_number": 17, "severity_text": "ERROR", "body": "simulated a dummy crash"},
+            {"severity_number": 17, "severity_text": "ERROR", "body": "request failed"},
             {"severity_number": 9, "severity_text": "INFO", "body": "page served"},
         ],
-        "traces": [{"name": "dummy-crash", "status_code": 2, "status_message": "dummy crash"}],
+        "traces": [{"name": "GET /", "status_code": 2, "status_message": "request failed"}],
     }
     anomaly = analyze_window(crashed)
-    for expected in ("dummy-crash-metric", "error-logs", "failed-spans"):
+    for expected in ("error-logs", "failed-spans"):
         if expected not in anomaly["signals"]:
             raise SystemExit(f"{STEP}: missing signal {expected} in {anomaly['signals']}")
-    if not anomaly["detected"] or anomaly["severity"] != "high":
-        raise SystemExit(f"{STEP}: crash window not flagged high {anomaly}")
-
-    # Post-remediation shape: the counter is still present (cumulative) but
-    # no increment happened inside the window -> no fault signal.
-    cleared = {
-        "ever_seen": True,
-        "last_seen_seconds_ago": 1.0,
-        "metrics": {"service.uptime": 12.0, "dummy-crash": 1},
-        "metric_events": [],
-        "logs": [],
-        "traces": [],
-    }
-    anomaly = analyze_window(cleared)
-    if anomaly["detected"]:
-        raise SystemExit(f"{STEP}: cleared window must not flag the stale counter {anomaly}")
-
-    # Windows without metric_events (synthetic shapes) fall back to the raw value.
-    legacy = {
-        "ever_seen": True,
-        "last_seen_seconds_ago": 2.0,
-        "metrics": {"dummy-crash": 1},
-        "logs": [],
-        "traces": [],
-    }
-    if "dummy-crash-metric" not in analyze_window(legacy)["signals"]:
-        raise SystemExit(f"{STEP}: legacy raw-value window should flag the counter")
+    if not anomaly["detected"] or anomaly["severity"] != "medium":
+        raise SystemExit(f"{STEP}: expected two signals with medium severity: {anomaly}")
 
     silent = {"ever_seen": True, "last_seen_seconds_ago": 42.0, "metrics": {}, "logs": [], "traces": []}
     anomaly = analyze_window(silent)
@@ -358,14 +319,14 @@ def self_check():
         raise SystemExit(f"{STEP}: exhausted attempts should fail, got {result}")
     from unittest.mock import patch
     with patch.object(llm, "available", return_value=True), patch.object(llm, "chat_json") as chat:
-        boundary = {**healthy, "metrics": {"service.cpu.load": 50, "service.memory.load": 50}}
+        boundary = {**healthy, "metrics": {"service.cpu.load": 80, "service.memory.load": 80}}
         model_node = build_node()
         for sample in (healthy, unknown, boundary):
             assert model_node(state.initial_state("vm-1", telemetry=sample)).goto == "__end__"
         chat.assert_not_called()
-        chat.return_value = {"summary": "Resource usage exceeds 50%.", "detected": False}
+        chat.return_value = {"summary": "Resource usage exceeds 80%.", "detected": False}
         for metric, signal in (("service.cpu.load", "cpu-saturation"), ("service.memory.load", "memory-pressure")):
-            sample = {**healthy, "metrics": {metric: 50.1}}
+            sample = {**healthy, "metrics": {metric: 80.1}}
             result = model_node(state.initial_state("vm-1", telemetry=sample))
             assert result.goto == state.NODE_RCA
             assert result.update["anomaly"] == {**analyze_window(sample), "summary": chat.return_value["summary"]}

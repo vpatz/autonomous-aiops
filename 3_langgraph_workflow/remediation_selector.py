@@ -320,7 +320,7 @@ def self_check():
     root_cause = {
         "found": True,
         "component": SERVICE_UNIT,
-        "summary": "dummy-crash fault state persists until restart",
+        "summary": "The systemd unit is not running",
         "confidence": "high",
     }
     workflow_state = state.initial_state("vm-1")

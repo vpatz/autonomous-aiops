@@ -235,17 +235,19 @@ class WorkflowHandler(collector.CollectorHandler):
 
     runs = {}  # service_name -> latest final state (or {"running": True})
     runs_lock = threading.Lock()
-    model_results = {}  # latest flagged incident per VM; healthy polls leave this intact
+    model_results = {}  # per-VM incident history, oldest first; healthy polls do not append
 
     @classmethod
     def record_model_result(cls, service, verifying, verdict, failure=None):
         with cls.runs_lock:
-            cls.model_results[service] = {
+            entry = {
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "phase": "verification" if verifying else "detection",
                 "verdict": verdict,
                 "failure": failure,
             }
+            # Replace rather than mutate so an in-progress dashboard snapshot stays stable.
+            cls.model_results[service] = (*cls.model_results.get(service, ())[-99:], entry)
 
     def do_GET(self):
         from urllib.parse import parse_qs, urlparse
@@ -327,9 +329,19 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
                 "max_attempts": run.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS),
                 "investigation_steps": len(run.get("investigation", [])),
             }
+        history = results_snapshot.get(name, ())
+        incident_lines = []
+        for entry in history:
+            verdict = entry["verdict"]
+            source = "LLM" if verdict["source"] == "llm" else "rules"
+            text = f"[{entry['at']}] {entry['phase']} · {source} · {verdict['severity']}: {verdict['summary']}"
+            if entry["failure"]:
+                text += f" (model error: {entry['failure']})"
+            incident_lines.append(" ".join(text.split()))
         services.append({
             "name": name,
-            "detector_llm": results_snapshot.get(name),
+            "detector_llm": history[-1] if history else None,
+            "incident_lines": incident_lines,
             "vm": {
                 "status": vm_status,
                 "last_seen_seconds_ago": last_seen,
@@ -346,7 +358,6 @@ def dashboard_data(store, runs, runs_lock, inventory=None, model_results=None):
                 "memory": metrics.get("service.memory.load"),
                 "active_requests": metrics.get("service.requests.active"),
                 "peak_requests": store.peak_requests(name),
-                "fault": metrics.get("dummy-crash", 0),
             },
             "run": run_view,
         })
@@ -614,7 +625,6 @@ def render_dashboard_shell():
       const uptime = sideStat(side, 'process uptime');
       const restarts = sideStat(side, 'restarts 10m');
       const signals = sideStat(side, 'm / l / t');
-      const fault = sideStat(side, 'fault flag');
       dials.appendChild(side);
       root.appendChild(dials);
 
@@ -624,7 +634,8 @@ def render_dashboard_shell():
       const anomalyPill = pill('muted', 'no run yet');
       const anomalyText = el('span', 'text', '');
       anomalyRow.appendChild(anomalyPill); anomalyRow.appendChild(anomalyText);
-      const model = outputPanel(root, 'Latest rule-detected incident', svc.name);
+      const model = outputPanel(root, 'Anomaly summaries (newest last)', svc.name);
+      model.box.wrap = 'off';
 
       const rca = outputPanel(root, 'Root cause analysis output', svc.name);
 
@@ -634,9 +645,9 @@ def render_dashboard_shell():
 
       cardsRoot.appendChild(root);
       return { root: root, status: status, cpu: cpu, mem: mem, requests: requests, uptime: uptime,
-               restarts: restarts, signals: signals, fault: fault,
+               restarts: restarts, signals: signals,
                anomalyPill: anomalyPill, anomalyText: anomalyText,
-               msgBox: messages.box, modelBox: model.box, modelLabel: model.label,
+               msgBox: messages.box, modelBox: model.box,
                rcaBox: rca.box, remedyBox: remedy.box };
     }
 
@@ -648,11 +659,11 @@ def render_dashboard_shell():
 
     function updateCard(svc, refs) {
       const vm = svc.vm, service = svc.service;
-      const call = svc.detector_llm;
-      refs.modelLabel.textContent = 'Latest rule-detected incident' +
-        (call ? ' · ' + call.phase + ' · ' + call.at : '');
-      refs.modelBox.value = call ? JSON.stringify(call.failure ? {...call.verdict, model_error: call.failure}
-        : call.verdict, null, 2) : 'No rule-detected incident reported.';
+      const summaries = svc.incident_lines.join('\n') || 'No rule-detected incident reported.';
+      if (refs.modelBox.value !== summaries) {
+        refs.modelBox.value = summaries;
+        refs.modelBox.scrollTop = refs.modelBox.scrollHeight;
+      }
       // VM status is color-coded on the card itself; cards are never
       // removed for a down VM, so the last known state stays visible.
       refs.root.className = 'card vm-' + vm.status;
@@ -673,8 +684,6 @@ def render_dashboard_shell():
       refs.uptime.textContent = fmtDuration(service.uptime);
       refs.restarts.textContent = String(service.restarts);
       refs.signals.textContent = vm.metrics + ' / ' + vm.logs + ' / ' + vm.traces;
-      refs.fault.textContent = service.fault > 0 ? String(service.fault) : 'clear';
-      refs.fault.style.color = service.fault > 0 ? 'var(--bad)' : 'var(--ok)';
 
       // Message feed: updated on every poll, regardless of run state.
       const lines = (svc.messages || []).map(function (m) {
@@ -925,6 +934,13 @@ def self_check():
                                  model_results=WorkflowHandler.model_results)
         card = next(c for c in preview["services"] if c["name"] == "vm-1")
         assert card["run"] is None and card["detector_llm"]["verdict"]["summary"] == "Error logs were received."
+        WorkflowHandler.record_model_result("vm-1", True, {
+            "source": "rules", "severity": "low", "summary": "CPU exceeded\n80%."}, "model unavailable")
+        updated = dashboard_data(history, {}, WorkflowHandler.runs_lock, inventory={},
+                                 model_results=WorkflowHandler.model_results)
+        lines = next(c for c in updated["services"] if c["name"] == "vm-1")["incident_lines"]
+        assert lines[:-1] == card["incident_lines"] and lines[0].startswith("[")
+        assert "verification · rules · low: CPU exceeded 80%." in lines[-1] and "\n" not in lines[-1]
         payload = json.loads(chat.call_args.args[0][1]["content"])
         assert payload["lookback_seconds"] == 10
         evidence = payload["evidence"]
@@ -940,7 +956,7 @@ def self_check():
     store.record_metrics(collector.parse_metrics(
         collector.sample_metrics_payload(
             "vm-1", {"service.uptime": 42.0, "service.cpu.load": 3.0,
-                     "service.memory.load": 12.0, "service.requests.active": 7, "dummy-crash": 1}),
+                     "service.memory.load": 12.0, "service.requests.active": 7}),
         received_at=now - 2))
     run = state.initial_state("vm-1", telemetry={})
     run.update({
@@ -963,11 +979,9 @@ def self_check():
     service = by_name["vm-1"]
     if service["name"] != "vm-1" or service["vm"]["status"] != "flowing":
         raise SystemExit(f"{STEP}: dashboard data vm view wrong: {service['vm']}")
-    if (service["vm"]["metrics"] < 5 or service["service"]["cpu"] != 3.0
+    if (service["vm"]["metrics"] < 4 or service["service"]["cpu"] != 3.0
             or service["service"]["active_requests"] != 7):
         raise SystemExit(f"{STEP}: dashboard data telemetry wrong: {service}")
-    if service["service"]["fault"] != 1:
-        raise SystemExit(f"{STEP}: dashboard data fault flag wrong: {service['service']}")
     # A VM the cluster reports as stopped keeps its card, marked down.
     if "vm-2" not in by_name or by_name["vm-2"]["vm"]["status"] != "down":
         raise SystemExit(f"{STEP}: stopped VM must keep a card with status down: {data['services']}")

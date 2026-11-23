@@ -115,8 +115,7 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - `service.py` runs cleanly and only pushes telemetry (metrics every 2s, Flask
   request spans, an OTLP log pipeline). Faults are injected exclusively by the
   stage-4 chaos injector; the systemd unit has `Restart=no`, so a killed service
-  stays down until the workflow remediates it. The detector still recognizes a
-  `dummy-crash` counter increment as a fault signal for services that report one.
+  stays down until the workflow remediates it.
 - Stage 3 verification semantics: a service is "down" when its latest metrics are older
   than `--silence-seconds` (default 10s; services never seen are never restarted); the
   RCA inner loop is bounded by `--max-iterations` (25), the remediation outer loop by
