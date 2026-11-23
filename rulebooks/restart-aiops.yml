@@ -26,3 +26,13 @@
           organization: Default
           job_args:
             limit: "{{ event.payload.service }}"
+    - name: Relieve resource pressure on the requested demo VM
+      condition: >-
+        event.payload.action == "cleanup_pressure" and
+        event.payload.service in ["rhel10-service-1", "rhel10-service-2", "rhel10-service-3", "rhel10-service-4"]
+      action:
+        run_job_template:
+          name: AIOps - clean up resource pressure
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.service }}"

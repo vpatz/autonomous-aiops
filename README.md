@@ -37,12 +37,13 @@ Load-generator pod ── GET / or /health ──► Flask service on a randomly
 
 - **Traffic and telemetry.** Across all four VMs, the generator targets 1 request/s, adds 5 each second up to 500/s, holds for 5 seconds, then repeats. Every two seconds it sends HTTP status counts for each VM and second. `no_response` means the client got no HTTP status; an empty count means no completions. These reports never refresh the guest heartbeat. The VM itself exports metrics every two seconds, including host CPU, memory, process uptime, and `service.requests.active` (requests in flight at collection time, not requests/s).
 - **Detection.** Each poll checks per-VM rules: telemetry silence from a previously seen VM, host CPU or memory utilization above 80%, error logs, failed spans, and impossible zero readings. Only flagged windows need an LLM summary. The model gets the rule facts and the latest **10 seconds** of telemetry, including client observations. Rules alone decide severity and whether to investigate.
-- **Investigation and recovery.** The root-cause agent uses Linux MCP tools to check evidence such as systemd status and journal logs. With Event-Driven Ansible (EDA) configured, a high-confidence diagnosis can trigger one of the two recovery actions below. The stock deployment without EDA uses mock Ansible execution. EDA accepting an event is not proof of recovery: check the controller job and telemetry received after the action.
+- **Investigation and recovery.** The root-cause agent uses Linux MCP tools to check evidence such as systemd status and journal logs. EDA routes approved recovery actions to the affected VM. Without EDA, the stock deployment uses mock Ansible execution. EDA accepting an event is not proof of recovery: check the controller job and telemetry received after the action.
 
 | Confirmed condition | EDA action | Controller job |
 | --- | --- | --- |
 | `aiops-demo.service` is down on a running VM | `restart` | [Start the systemd unit over SSH](playbooks/restore-aiops.yml) |
 | A previously reporting VM goes silent and KubeVirt confirms it is halted | `restart_vm` | [Start that VM through the KubeVirt API](playbooks/restore-vm.yml) |
+| CPU or memory exceeds 80% and a disposable service contributes to the pressure | `cleanup_pressure` | [Remove one contributing workload and check VM stability](playbooks/cleanup-pressure.yml) |
 
 Silence alone does not authorize powering on a VM. The [EDA rulebook](rulebooks/restart-aiops.yml) targets one named VM; not every anomaly has an approved recovery action.
 

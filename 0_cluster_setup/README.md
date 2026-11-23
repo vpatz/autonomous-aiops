@@ -145,13 +145,14 @@ UI/API, in organization `Default`. See the [EDA contract](../3_langgraph_workflo
    **AIOps demo VMs** inventory with group `aiops_vms` and the four hosts
    `rhel10-service-1` through `-4`, each with `ansible_host` set to
    `<name>.my-vm-project.svc.cluster.local`.
-2. Create the two templates below with those **exact names**; the rulebook
+2. Create the templates below with those **exact names**; the rulebook
    references them. Use the demo project/inventory, **Prompt on launch for
    Limit**, and allow the dedicated EDA launcher user to execute only these jobs.
 
    | Template | Playbook | Credential |
    |---|---|---|
    | `AIOps - restore demo service` | `playbooks/restore-aiops.yml` | Machine credential: `rheluser` and the new VM SSH key; the unit is started via sudo. |
+   | `AIOps - clean up resource pressure` | `playbooks/cleanup-pressure.yml` | Same demo VM machine credential; limit required. |
    | `AIOps - restore stopped VM` | `playbooks/restore-vm.yml` | Apply `playbooks/vm-recovery-rbac.yaml`. In an AAP custom credential type inject `token` as `AIOPS_VM_TOKEN` and `ca` as a temporary file (`file.template: "{{ ca }}"`, `AIOPS_VM_CA_FILE: "{{ tower.filename }}"`). Populate it privately from `aap/aiops-vm-recovery-token` (`token`, `ca.crt`). |
 
 3. In Automation Decisions create a **Basic Event Stream** credential and
@@ -161,7 +162,7 @@ UI/API, in organization `Default`. See the [EDA contract](../3_langgraph_workflo
 4. Create activation **AIOps demo service recovery**, use the synced
    `restart-aiops.yml` rulebook and Default Decision Environment. Map source
    `aiops_events` to the new event stream and attach the launcher credential.
-   Verify `running` and two rules. Use **this stream's** URL and Basic-auth
+   Verify `running` and three rules. Use **this stream's** URL and Basic-auth
    values in `eda-config` (step 3). The workflow then dispatches to EDA
    instead of mock Ansible MCP.
 

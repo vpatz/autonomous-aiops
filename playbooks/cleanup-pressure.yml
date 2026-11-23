@@ -1,0 +1,48 @@
+---
+- name: Remove one disposable workload responsible for guest resource pressure
+  hosts: aiops_vms
+  gather_facts: false
+  tasks:
+    - name: Require a single allowlisted VM
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - ansible_limit | default('') == inventory_hostname
+          - inventory_hostname in ['rhel10-service-1', 'rhel10-service-2', 'rhel10-service-3', 'rhel10-service-4']
+    - name: Capture boot ID, critical service PIDs and failed services
+      ansible.builtin.shell: &stability |
+        set -eu
+        cat /proc/sys/kernel/random/boot_id
+        for unit in aiops-demo sshd NetworkManager; do
+          systemctl is-active "$unit.service"
+          systemctl show -p MainPID --value "$unit.service"
+        done
+        systemctl list-units --type=service --state=failed --plain --no-legend --no-pager
+      changed_when: false
+      register: before
+    - name: Verify the demo endpoint before cleanup
+      ansible.builtin.uri: &probe
+        url: http://127.0.0.1:5000/health
+        status_code: 200
+        timeout: 10
+    - name: Measure the suspected workload and clean it up
+      block:
+        - name: Run cleanup as the demo SSH account
+          ansible.builtin.script: files/cleanup_pressure.py {{ inventory_hostname }}
+          args:
+            executable: /usr/bin/python3
+          register: cleanup
+          changed_when: cleanup.rc == 0 and (cleanup.stdout | trim | from_json).removed is not none
+      always:
+        - name: Check that SSH still works
+          ansible.builtin.wait_for_connection:
+            timeout: 20
+        - name: Recheck boot ID, critical services and failed units
+          ansible.builtin.shell: *stability
+          changed_when: false
+          register: after
+        - name: Assert the VM and critical services stayed up
+          ansible.builtin.assert:
+            that: before.stdout_lines == after.stdout_lines
+        - name: Verify the demo endpoint after cleanup
+          ansible.builtin.uri: *probe

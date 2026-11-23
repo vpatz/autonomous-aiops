@@ -124,9 +124,9 @@ oc delete pod aiops-workflow -n my-vm-project --ignore-not-found
 oc apply -f 3_langgraph_workflow/workflow-pod.yaml
 ```
 
-With `EDA_EVENT_URL` set, EDA replaces MCP execution: the agent dispatches
-only the fixed restart action for a high-confidence diagnosis of the demo
-unit on a VM in `DASHBOARD_VMS`. The dashboard distinguishes event acceptance
+With `EDA_EVENT_URL` set, EDA replaces MCP execution on VMs in `DASHBOARD_VMS`.
+A high-confidence diagnosis of the stopped demo unit selects service recovery.
+The dashboard distinguishes event acceptance
 from telemetry verification. Check the activation's event history and the
 controller job history to confirm the rulebook ran the job.
 
@@ -147,6 +147,21 @@ from the operator-generated `aap/aiops-vm-recovery-token` Secret: inject
 controller credential. The launcher needs Execute on
 this template. Sync both AAP projects and refresh the activation after changing
 the rulebook. A delayed or repeated event does not reboot an already running VM.
+
+For `cpu-saturation` or `memory-pressure`, `cleanup_pressure` launches
+**AIOps - clean up resource pressure**, using the demo inventory, machine SSH
+credential, and **Prompt on launch** for the host limit. The job samples guest CPU,
+memory, and cgroup usage for two seconds. It removes at most one active service
+accounting for at least 10% of host CPU or RAM while that resource is above 80%.
+Eligible services are the injector's VM-specific transient `chaos-stress-…` units
+and `rheluser`'s disposable `aiops-disposable-*.service` files located directly
+in `~/.config/systemd/user/`. The latter are backed up under
+`~/.local/state/aiops-recovery/` before being disabled and removed. To restore
+one, copy the backup to the original directory, run `systemctl --user daemon-reload`,
+and restore its previous enabled/running state. No eligible contributor under
+pressure fails the job; pressure already cleared is a no-op. The job checks
+boot ID, critical service PIDs, failed units, SSH and `/health`. The workflow
+separately waits for fresh post-dispatch CPU **and** memory readings at or below 80%.
 
 ### Integrating an LLM
 

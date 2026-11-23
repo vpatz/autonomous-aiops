@@ -26,6 +26,7 @@ import urllib.request
 
 import llm
 import agent_tracing
+import anomaly_detector
 import mcp_client
 import state
 
@@ -33,6 +34,20 @@ STEP = "agent 3 remediation selector"
 SERVICE_UNIT = "aiops-demo.service"
 RESTART_TOOL_CANDIDATES = ("restart_service", "run_module", "run_ansible_module", "run_playbook")
 VERIFY_POLL_SECONDS = 2
+
+
+def pressure_incident(workflow_state):
+    signals = set(workflow_state.get("anomaly", {}).get("signals", []))
+    return (workflow_state.get("vm_halted") is not True
+            and not signals.intersection(("metrics-silent", "zero-telemetry"))
+            and bool(signals.intersection(("cpu-saturation", "memory-pressure"))))
+
+
+def pressure_cleared(window):
+    metrics = window.get("metrics", {})
+    return all(isinstance(metrics.get(k), (float, int)) and 0 <= metrics[k] <= limit
+               for k, limit in [("service.cpu.load", anomaly_detector.CPU_THRESHOLD_PERCENT),
+                                ("service.memory.load", anomaly_detector.MEMORY_THRESHOLD_PERCENT)])
 
 
 def truncate(text, limit=300):
@@ -161,9 +176,17 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False, on_progress=N
         root_cause = workflow_state.get("root_cause", {})
         if on_progress:
             on_progress(service_name, "remedy", "Selecting an approved recovery action…")
+        if pressure_incident(workflow_state) and not eda:
+            return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                "findings": [f"[{STEP}] pressure cleanup requires the approved EDA controller template"]})
         if eda:
-            # This stream's rulebook contract is a restart of the demo unit.
-            # It is not an arbitrary Ansible module or shell execution endpoint.
+            if (service_name in os.environ.get("DASHBOARD_VMS", "").split()
+                    and pressure_incident(workflow_state)):
+                return Command(goto=state.NODE_EXECUTOR, update={
+                    "status": state.STATUS_REMEDIATING,
+                    "remediation": {"approved_tools": ["cleanup_pressure"], "plan": [
+                        {"tool": "cleanup_pressure", "arguments": {"vm": service_name}}]},
+                    "findings": [f"[{STEP}] recheck guest pressure and remove a contributing disposable unit"]})
             vm_restart = workflow_state.get("vm_halted") is True
             component = "VirtualMachine" if vm_restart else SERVICE_UNIT
             if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
@@ -252,9 +275,15 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         results = []
         ok = True
         vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
+        cleanup = deliver is not None and bool(plan) and plan[0]["tool"] == "cleanup_pressure"
         if deliver is not None:
+            if cleanup and (not pressure_incident(workflow_state) or "cleanup_pressure" not in approved
+                            or service_name not in os.environ.get("DASHBOARD_VMS", "").split()):
+                return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                               "findings": [f"[{STEP}] unapproved pressure cleanup"]})
             progress(f"Sending {plan[0]['tool']} to EDA…")
-            eda_record = deliver(build_eda_payload("restart_vm" if vm_restart else "restart", service_name, plan,
+            action = "cleanup_pressure" if cleanup else ("restart_vm" if vm_restart else "restart")
+            eda_record = deliver(build_eda_payload(action, service_name, plan,
                                                    workflow_state.get("root_cause", {})))
             ok = eda_record.get("ok", False)
             results.append({"step": plan[0], "ok": ok, "output": eda_record["status"]})
@@ -298,12 +327,17 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
             delivery = "EDA accepted the request" if deliver is not None else "Plan executed"
             progress(f"{delivery}; waiting for fresh telemetry to verify recovery…")
             telemetry = get_window(service_name, window_seconds, since=verify_since)
-            deadline = time.monotonic() + max(240 if vm_restart else 0, verify_wait_seconds)
+            deadline = time.monotonic() + max(240 if vm_restart else (90 if cleanup else 0), verify_wait_seconds)
             while time.monotonic() < deadline:
-                if telemetry.get("metrics"):
+                ready = pressure_cleared(telemetry) if cleanup else bool(telemetry.get("metrics"))
+                if ready:
                     break  # fresh post-remediation telemetry is arriving
                 time.sleep(VERIFY_POLL_SECONDS)
                 telemetry = get_window(service_name, window_seconds, since=verify_since)
+        if cleanup and (get_window is None or not pressure_cleared(telemetry)):
+            findings.append(f"[{STEP} executor] no fresh recovery of both resource gauges; check controller job")
+            update["status"] = state.STATUS_FAILED
+            return Command(goto="__end__", update=update)
         findings.append(f"[{STEP} executor] handing over to the anomaly detector for verification")
         update.update(
             {
@@ -430,6 +464,19 @@ def self_check():
         assert vm_case["remediation"]["plan"][0]["tool"] == "restart_vm"
         build_executor_node(get_window=get_window, deliver=accept)(vm_case)
         assert events[-1]["action"] == "restart_vm"
+        for signal in ("cpu-saturation", "memory-pressure"):
+            case = {**workflow_state, "anomaly": {"signals": [signal]},
+                    "root_cause": {"component": "host", "confidence": "medium"}}
+            case.update(select(case).update)
+            def normal(service, seconds, since):
+                assert since > 0
+                return {"metrics": {"service.cpu.load": 40, "service.memory.load": 20}}
+            r = build_executor_node(get_window=normal, deliver=accept)(case)
+            assert events[-1]["action"] == "cleanup_pressure" and r.goto == state.NODE_DETECTOR
+            assert select({**case, "service_name": "other"}).goto == "__end__"
+            assert select({**case, "anomaly": {"signals": [signal, "metrics-silent"]}}).goto == "__end__"
+        assert not pressure_cleared({"metrics": {"service.cpu.load": 1}})
+        assert not pressure_cleared({"metrics": {"service.cpu.load": 81, "service.memory.load": 1}})
     rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
     assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 
