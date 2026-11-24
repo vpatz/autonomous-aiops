@@ -6,22 +6,13 @@ Rules flag problems such as missing telemetry or CPU or memory usage above 80%. 
 
 **[Follow the demo walkthrough](demo.md)** to inject faults, watch the per-VM dashboard, and inspect the agent’s decisions in MLflow.
 
-## Try it offline
-
-Run from the repository root:
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r 3_langgraph_workflow/requirements.txt
-python3 3_langgraph_workflow/workflow.py --demo
-```
-
-The offline demo walks through a stopped service and its recovery using synthetic telemetry and mock tools. No cluster, LLM, or Ansible installation is needed. To run the built-in checks, use `python3 3_langgraph_workflow/workflow.py --self-check`.
+For a terminal-only run without a cluster, see [Offline testing](offline-testing.md).
 
 ## Run it on OpenShift
 
-If you use OpenCode, log in to the target cluster with `oc` and run [`/prep-cluster`](.opencode/commands/prep-cluster.md) from this repository. It installs and verifies the platform prerequisites. Then continue with VM credentials and application deployment below.
+Log in to the target cluster with `oc`. In OpenCode, run [`/prep-cluster`](.opencode/commands/prep-cluster.md) to install the platform prerequisites, then [`/deploy-demo`](.opencode/commands/deploy-demo.md) to deploy the demo and print the **AIOps dashboard** and **MLflow** URLs.
+
+For manual deployment:
 
 1. Follow the [cluster setup guide](0_cluster_setup/README.md) to provision the four VMs, their SSH credentials, and Linux MCP in `my-vm-project`.
 2. Configure an [LLM endpoint](3_langgraph_workflow/README.md#integrating-an-llm) for model-assisted investigation and [EDA](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible) for real recovery. Without EDA, the default executor is a mock. **On a new cluster**, copy the event stream’s full HTTPS POST URL and matching credentials into `eda-config`; changing the hostname alone is not enough.

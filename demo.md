@@ -81,4 +81,4 @@ oc -n my-vm-project exec aiops-workflow -- env PYTHONPATH=/tmp/pydeps \
   python3 /opt/workflow/workflow.py --demo
 ```
 
-This uses the instrumented graph with **mock tools and synthetic telemetry**. Show the two `run_command` tool iterations (unit status, then journal), followed by the RCA conclusion. If the cluster is unavailable, use the [offline quick start](README.md#try-it-offline) to show the same sequence in the terminal.
+This uses the instrumented graph with **mock tools and synthetic telemetry**. Show the two `run_command` tool iterations (unit status, then journal), followed by the RCA conclusion. If the cluster is unavailable, use the [offline quick start](offline-testing.md) to show the same sequence in the terminal.
