@@ -27,6 +27,8 @@ import shlex
 import subprocess
 import urllib.request
 
+import agent_tracing
+
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -71,8 +73,17 @@ class BaseMcpClient:
         return (self._request("tools/list", {}) or {}).get("tools", [])
 
     def call_tool(self, name, arguments=None):
-        result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
-        return tool_text(result)
+        with agent_tracing.tool_span(name, arguments or {}) as record:
+            try:
+                result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+                text = tool_text(result)
+            except McpError as exc:
+                record["status"] = "failed"
+                record["output"] = agent_tracing.snippet(str(exc))
+                raise
+            record["status"] = "ok"
+            record["output"] = agent_tracing.snippet(text)
+            return text
 
     def _request(self, method, params):
         raise NotImplementedError
@@ -302,6 +313,31 @@ def self_check():
         raise SystemExit("mcp client: unknown tool should raise")
     except McpError:
         pass
+
+    # Tool calls record name, arguments and output for the MLflow trace.
+    import contextlib
+    from unittest.mock import patch
+
+    recorded = []
+
+    @contextlib.contextmanager
+    def fake_tool_span(tool, arguments):
+        record = {"tool": tool, "arguments": arguments}
+        recorded.append(record)
+        yield record
+
+    with patch.object(agent_tracing, "tool_span", fake_tool_span):
+        status = fake.call_tool("run_command", {"command": "systemctl status aiops-demo.service"})
+    if (recorded[-1]["tool"] != "run_command" or recorded[-1]["status"] != "ok"
+            or "failed (Result: exit-code)" not in recorded[-1]["output"]):
+        raise SystemExit(f"mcp client: tool call not recorded for tracing: {recorded[-1]}")
+    with patch.object(agent_tracing, "tool_span", fake_tool_span):
+        try:
+            fake.call_tool("nope", {})
+        except McpError:
+            pass
+    if recorded[-1]["status"] != "failed" or "unknown linux tool" not in recorded[-1]["output"]:
+        raise SystemExit(f"mcp client: failed tool call not recorded: {recorded[-1]}")
     fake.close()
 
     # Exercise the real stdio JSON-RPC framing against the mock server.

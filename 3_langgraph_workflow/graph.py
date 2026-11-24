@@ -20,6 +20,8 @@ Verify:
 """
 
 import argparse
+import contextlib
+
 import agent_tracing
 
 import anomaly_detector
@@ -65,11 +67,13 @@ def build_graph(
     return graph.compile()
 
 
-def run(app, workflow_state, label=None, print_steps=True, on_step=None):
+def run(app, workflow_state, label=None, print_steps=True, on_step=None, traced=True):
     """Run the graph to completion, printing new findings as they appear.
 
     Returns the final state. Uses stream mode "values" so the demo shows the
     sequence of steps and iterations performed by the multi-agent workflow.
+    With traced=False the caller owns the workflow span (used when detection
+    runs before the graph so both land in one trace).
     """
     label = label or workflow_state.get("service_name", "workflow")
     config = {"recursion_limit": 20 + 10 * (
@@ -77,8 +81,9 @@ def run(app, workflow_state, label=None, print_steps=True, on_step=None):
         + workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS))}
     final = None
     seen = 0
-    with agent_tracing.span("aiops.workflow", {"service": workflow_state["service_name"]},
-                            workflow=True) as output:
+    span_cm = (agent_tracing.span("aiops.workflow", {"service": workflow_state["service_name"]},
+                                   workflow=True) if traced else contextlib.nullcontext(None))
+    with span_cm as output:
         for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
             final = snapshot
             if on_step is not None:
@@ -88,7 +93,7 @@ def run(app, workflow_state, label=None, print_steps=True, on_step=None):
                 for line in findings[seen:]:
                     print(f"[{state.ist_timestamp()}] [{label}] {line}", flush=True)
             seen = len(findings)
-        if final:
+        if final and output is not None:
             output.update(status=final.get("status"), attempts=final.get("attempts"))
     return final
 
@@ -190,6 +195,12 @@ def self_check():
     final = run(app, state.initial_state("vm-1", telemetry=healthy), print_steps=False)
     if final.get("status") != state.STATUS_HEALTHY:
         raise SystemExit(f"graph: scenario C expected HEALTHY, got {final.get('status')}")
+
+    # A caller-owned workflow span (traced=False) must not change the result.
+    final = run(app, state.initial_state("vm-1", telemetry=healthy),
+                print_steps=False, traced=False)
+    if final.get("status") != state.STATUS_HEALTHY:
+        raise SystemExit(f"graph: untraced run expected HEALTHY, got {final.get('status')}")
     print("graph: self-check ok", flush=True)
 
 

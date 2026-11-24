@@ -55,7 +55,10 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Stage 3 has `3_langgraph_workflow/requirements.txt`; the pod install pins live in
   `build_pod_manifest.py`. Agent instrumentation (`agent_tracing.py`) uses
   `mlflow-tracing` and Kubernetes namespaced auth. `MLFLOW_TRACKING_URI`
-  enables it; agent spans go to experiment `aiops-workflow`, not the VM collector.
+  enables it; spans go to experiment `aiops-workflow`, not the VM collector.
+  One trace covers a whole incident run (detection through verification):
+  agent spans plus nested `llm <phase>` spans (prompts, status, duration,
+  tokens) and `tool <name>` spans (arguments, output snippet, status).
   The LLM client (`llm.py`, OpenAI-compatible
   `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) and the MCP client (stdio + streamable HTTP)
   are stdlib-only. A virtualenv is needed locally; nothing is committed.

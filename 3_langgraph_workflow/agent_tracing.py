@@ -6,6 +6,7 @@ from functools import wraps
 import logging
 import os
 import threading
+import time
 
 _root = ContextVar("aiops_mlflow_root", default=None)
 _lock = threading.Lock()
@@ -90,6 +91,48 @@ def llm_span(service, phase, inputs=None):
                 live.end(outputs=outputs, status="ERROR" if failed else "OK")
             except Exception as exc:
                 _log.warning("MLflow could not finish llm %s (%s)", phase, type(exc).__name__)
+
+
+def snippet(text, limit=2000):
+    """Compact tool output for span recording (MLflow caps tags at 8000 chars)."""
+    text = (text or "").strip().replace("\n", " | ")
+    return text if len(text) <= limit else text[:limit] + "…[truncated]"
+
+
+@contextmanager
+def tool_span(tool, arguments):
+    """One MCP tool call nested under the current agent span.
+
+    Records the tool name, its arguments, an output snippet, status and
+    duration; a no-op without MLflow or a parent span.
+    """
+    outputs = {"tool": tool, "arguments": arguments or {}}
+    parent = _root.get()
+    live = None
+    if os.environ.get("MLFLOW_TRACKING_URI") and parent is not None:
+        try:
+            live = _client().start_span_no_context(
+                name=f"tool {tool}", span_type="TOOL", parent_span=parent,
+                inputs=dict(outputs),
+            )
+        except Exception as exc:
+            _log.warning("MLflow could not start tool %s (%s)", tool, type(exc).__name__)
+    started = time.monotonic()
+    try:
+        yield outputs
+    except BaseException as exc:
+        outputs.setdefault("status", "failed")
+        outputs["error_type"] = type(exc).__name__
+        raise
+    finally:
+        outputs["duration_ms"] = round((time.monotonic() - started) * 1000)
+        if live is not None:
+            try:
+                failed = ("error_type" in outputs
+                          or str(outputs.get("status", "")).startswith("failed"))
+                live.end(outputs=outputs, status="ERROR" if failed else "OK")
+            except Exception as exc:
+                _log.warning("MLflow could not finish tool %s (%s)", tool, type(exc).__name__)
 
 
 def agent(name):

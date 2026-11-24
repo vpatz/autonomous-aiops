@@ -256,8 +256,11 @@ def build_node(linux_mcp=None, use_llm=True, get_vm_power_state=None, on_progres
                         if isinstance(facts, dict) and facts.get("hostname", "").split(".")[0] == service_name:
                             probe = "guest-reachable"
                     else:
-                        facts = get_vm_power_state(service_name)
-                        output = json.dumps(facts)
+                        with agent_tracing.tool_span("get_vm_power_state", {"vm": service_name}) as probe_record:
+                            facts = get_vm_power_state(service_name)
+                            output = json.dumps(facts)
+                            probe_record["status"] = "ok"
+                            probe_record["output"] = agent_tracing.snippet(output)
                         halted = (facts.get("vm") == service_name and facts.get("status") == "Stopped"
                                   and facts.get("configured_to_stop") is True)
                     status = "ok"

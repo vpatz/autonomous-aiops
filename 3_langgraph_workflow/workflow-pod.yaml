@@ -162,6 +162,7 @@ data:
     import logging
     import os
     import threading
+    import time
 
     _root = ContextVar("aiops_mlflow_root", default=None)
     _lock = threading.Lock()
@@ -246,6 +247,48 @@ data:
                     live.end(outputs=outputs, status="ERROR" if failed else "OK")
                 except Exception as exc:
                     _log.warning("MLflow could not finish llm %s (%s)", phase, type(exc).__name__)
+
+
+    def snippet(text, limit=2000):
+        """Compact tool output for span recording (MLflow caps tags at 8000 chars)."""
+        text = (text or "").strip().replace("\n", " | ")
+        return text if len(text) <= limit else text[:limit] + "…[truncated]"
+
+
+    @contextmanager
+    def tool_span(tool, arguments):
+        """One MCP tool call nested under the current agent span.
+
+        Records the tool name, its arguments, an output snippet, status and
+        duration; a no-op without MLflow or a parent span.
+        """
+        outputs = {"tool": tool, "arguments": arguments or {}}
+        parent = _root.get()
+        live = None
+        if os.environ.get("MLFLOW_TRACKING_URI") and parent is not None:
+            try:
+                live = _client().start_span_no_context(
+                    name=f"tool {tool}", span_type="TOOL", parent_span=parent,
+                    inputs=dict(outputs),
+                )
+            except Exception as exc:
+                _log.warning("MLflow could not start tool %s (%s)", tool, type(exc).__name__)
+        started = time.monotonic()
+        try:
+            yield outputs
+        except BaseException as exc:
+            outputs.setdefault("status", "failed")
+            outputs["error_type"] = type(exc).__name__
+            raise
+        finally:
+            outputs["duration_ms"] = round((time.monotonic() - started) * 1000)
+            if live is not None:
+                try:
+                    failed = ("error_type" in outputs
+                              or str(outputs.get("status", "")).startswith("failed"))
+                    live.end(outputs=outputs, status="ERROR" if failed else "OK")
+                except Exception as exc:
+                    _log.warning("MLflow could not finish tool %s (%s)", tool, type(exc).__name__)
 
 
     def agent(name):
@@ -700,6 +743,8 @@ data:
     import subprocess
     import urllib.request
 
+    import agent_tracing
+
     PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -744,8 +789,17 @@ data:
             return (self._request("tools/list", {}) or {}).get("tools", [])
 
         def call_tool(self, name, arguments=None):
-            result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
-            return tool_text(result)
+            with agent_tracing.tool_span(name, arguments or {}) as record:
+                try:
+                    result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+                    text = tool_text(result)
+                except McpError as exc:
+                    record["status"] = "failed"
+                    record["output"] = agent_tracing.snippet(str(exc))
+                    raise
+                record["status"] = "ok"
+                record["output"] = agent_tracing.snippet(text)
+                return text
 
         def _request(self, method, params):
             raise NotImplementedError
@@ -975,6 +1029,31 @@ data:
             raise SystemExit("mcp client: unknown tool should raise")
         except McpError:
             pass
+
+        # Tool calls record name, arguments and output for the MLflow trace.
+        import contextlib
+        from unittest.mock import patch
+
+        recorded = []
+
+        @contextlib.contextmanager
+        def fake_tool_span(tool, arguments):
+            record = {"tool": tool, "arguments": arguments}
+            recorded.append(record)
+            yield record
+
+        with patch.object(agent_tracing, "tool_span", fake_tool_span):
+            status = fake.call_tool("run_command", {"command": "systemctl status aiops-demo.service"})
+        if (recorded[-1]["tool"] != "run_command" or recorded[-1]["status"] != "ok"
+                or "failed (Result: exit-code)" not in recorded[-1]["output"]):
+            raise SystemExit(f"mcp client: tool call not recorded for tracing: {recorded[-1]}")
+        with patch.object(agent_tracing, "tool_span", fake_tool_span):
+            try:
+                fake.call_tool("nope", {})
+            except McpError:
+                pass
+        if recorded[-1]["status"] != "failed" or "unknown linux tool" not in recorded[-1]["output"]:
+            raise SystemExit(f"mcp client: failed tool call not recorded: {recorded[-1]}")
         fake.close()
 
         # Exercise the real stdio JSON-RPC framing against the mock server.
@@ -2626,8 +2705,11 @@ data:
                             if isinstance(facts, dict) and facts.get("hostname", "").split(".")[0] == service_name:
                                 probe = "guest-reachable"
                         else:
-                            facts = get_vm_power_state(service_name)
-                            output = json.dumps(facts)
+                            with agent_tracing.tool_span("get_vm_power_state", {"vm": service_name}) as probe_record:
+                                facts = get_vm_power_state(service_name)
+                                output = json.dumps(facts)
+                                probe_record["status"] = "ok"
+                                probe_record["output"] = agent_tracing.snippet(output)
                             halted = (facts.get("vm") == service_name and facts.get("status") == "Stopped"
                                       and facts.get("configured_to_stop") is True)
                         status = "ok"
@@ -3526,6 +3608,8 @@ data:
     """
 
     import argparse
+    import contextlib
+
     import agent_tracing
 
     import anomaly_detector
@@ -3571,11 +3655,13 @@ data:
         return graph.compile()
 
 
-    def run(app, workflow_state, label=None, print_steps=True, on_step=None):
+    def run(app, workflow_state, label=None, print_steps=True, on_step=None, traced=True):
         """Run the graph to completion, printing new findings as they appear.
 
         Returns the final state. Uses stream mode "values" so the demo shows the
         sequence of steps and iterations performed by the multi-agent workflow.
+        With traced=False the caller owns the workflow span (used when detection
+        runs before the graph so both land in one trace).
         """
         label = label or workflow_state.get("service_name", "workflow")
         config = {"recursion_limit": 20 + 10 * (
@@ -3583,8 +3669,9 @@ data:
             + workflow_state.get("max_attempts", state.DEFAULT_MAX_ATTEMPTS))}
         final = None
         seen = 0
-        with agent_tracing.span("aiops.workflow", {"service": workflow_state["service_name"]},
-                                workflow=True) as output:
+        span_cm = (agent_tracing.span("aiops.workflow", {"service": workflow_state["service_name"]},
+                                       workflow=True) if traced else contextlib.nullcontext(None))
+        with span_cm as output:
             for snapshot in app.stream(workflow_state, config=config, stream_mode="values"):
                 final = snapshot
                 if on_step is not None:
@@ -3594,7 +3681,7 @@ data:
                     for line in findings[seen:]:
                         print(f"[{state.ist_timestamp()}] [{label}] {line}", flush=True)
                 seen = len(findings)
-            if final:
+            if final and output is not None:
                 output.update(status=final.get("status"), attempts=final.get("attempts"))
         return final
 
@@ -3696,6 +3783,12 @@ data:
         final = run(app, state.initial_state("vm-1", telemetry=healthy), print_steps=False)
         if final.get("status") != state.STATUS_HEALTHY:
             raise SystemExit(f"graph: scenario C expected HEALTHY, got {final.get('status')}")
+
+        # A caller-owned workflow span (traced=False) must not change the result.
+        final = run(app, state.initial_state("vm-1", telemetry=healthy),
+                    print_steps=False, traced=False)
+        if final.get("status") != state.STATUS_HEALTHY:
+            raise SystemExit(f"graph: untraced run expected HEALTHY, got {final.get('status')}")
         print("graph: self-check ok", flush=True)
 
 
@@ -4570,28 +4663,36 @@ data:
                 incident_since = time.monotonic()
                 snapshot = {}
                 WorkflowHandler.start_run(service_name)
-                anomaly = anomaly_detector.summarize_incident(
-                    service_name, telemetry, trigger, args.silence_seconds,
-                    get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
-                    evidence_snapshot=snapshot)
-                app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
-                workflow_state = state.initial_state(
-                    service_name,
-                    window_seconds=args.window_seconds,
-                    telemetry=telemetry,
-                    max_iterations=args.max_iterations,
-                    max_attempts=args.max_attempts,
-                )
-                workflow_state["anomaly"] = anomaly
-                workflow_state["incident_since"] = incident_since
-                workflow_state["detector_evidence"] = snapshot
-                def publish_step(snapshot):
-                    keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
-                            "findings", "attempts", "max_attempts")
-                    WorkflowHandler.publish_run(service_name, {
-                        "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
+                # One trace per incident: the workflow span opens before the
+                # detector's model call, so every LLM call and tool call of the
+                # run lands in a single MLflow trace.
+                with agent_tracing.span("aiops.workflow", {"service": service_name},
+                                        workflow=True) as run_output:
+                    anomaly = anomaly_detector.summarize_incident(
+                        service_name, telemetry, trigger, args.silence_seconds,
+                        get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
+                        evidence_snapshot=snapshot)
+                    app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
+                    workflow_state = state.initial_state(
+                        service_name,
+                        window_seconds=args.window_seconds,
+                        telemetry=telemetry,
+                        max_iterations=args.max_iterations,
+                        max_attempts=args.max_attempts,
+                    )
+                    workflow_state["anomaly"] = anomaly
+                    workflow_state["incident_since"] = incident_since
+                    workflow_state["detector_evidence"] = snapshot
+                    def publish_step(snapshot):
+                        keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
+                                "findings", "attempts", "max_attempts")
+                        WorkflowHandler.publish_run(service_name, {
+                            "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
 
-                final = graph.run(app, workflow_state, label=service_name, on_step=publish_step)
+                    final = graph.run(app, workflow_state, label=service_name,
+                                      on_step=publish_step, traced=False)
+                    if final:
+                        run_output.update(status=final.get("status"), attempts=final.get("attempts"))
                 WorkflowHandler.publish_run(service_name, final or {"status": "unknown"})
                 close_clients(linux, ansible)
             except Exception as exc:  # noqa: BLE001 - a failed run must not kill the poller

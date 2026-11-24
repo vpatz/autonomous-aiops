@@ -857,28 +857,36 @@ def serve_forever(args):
             incident_since = time.monotonic()
             snapshot = {}
             WorkflowHandler.start_run(service_name)
-            anomaly = anomaly_detector.summarize_incident(
-                service_name, telemetry, trigger, args.silence_seconds,
-                get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
-                evidence_snapshot=snapshot)
-            app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
-            workflow_state = state.initial_state(
-                service_name,
-                window_seconds=args.window_seconds,
-                telemetry=telemetry,
-                max_iterations=args.max_iterations,
-                max_attempts=args.max_attempts,
-            )
-            workflow_state["anomaly"] = anomaly
-            workflow_state["incident_since"] = incident_since
-            workflow_state["detector_evidence"] = snapshot
-            def publish_step(snapshot):
-                keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
-                        "findings", "attempts", "max_attempts")
-                WorkflowHandler.publish_run(service_name, {
-                    "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
+            # One trace per incident: the workflow span opens before the
+            # detector's model call, so every LLM call and tool call of the
+            # run lands in a single MLflow trace.
+            with agent_tracing.span("aiops.workflow", {"service": service_name},
+                                    workflow=True) as run_output:
+                anomaly = anomaly_detector.summarize_incident(
+                    service_name, telemetry, trigger, args.silence_seconds,
+                    get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
+                    evidence_snapshot=snapshot)
+                app, linux, ansible = build_deps(args, store=store, on_progress=WorkflowHandler.progress)
+                workflow_state = state.initial_state(
+                    service_name,
+                    window_seconds=args.window_seconds,
+                    telemetry=telemetry,
+                    max_iterations=args.max_iterations,
+                    max_attempts=args.max_attempts,
+                )
+                workflow_state["anomaly"] = anomaly
+                workflow_state["incident_since"] = incident_since
+                workflow_state["detector_evidence"] = snapshot
+                def publish_step(snapshot):
+                    keys = ("anomaly", "investigation", "root_cause", "remediation", "remediation_result",
+                            "findings", "attempts", "max_attempts")
+                    WorkflowHandler.publish_run(service_name, {
+                        "running": True, **{k: snapshot[k] for k in keys if k in snapshot}})
 
-            final = graph.run(app, workflow_state, label=service_name, on_step=publish_step)
+                final = graph.run(app, workflow_state, label=service_name,
+                                  on_step=publish_step, traced=False)
+                if final:
+                    run_output.update(status=final.get("status"), attempts=final.get("attempts"))
             WorkflowHandler.publish_run(service_name, final or {"status": "unknown"})
             close_clients(linux, ansible)
         except Exception as exc:  # noqa: BLE001 - a failed run must not kill the poller

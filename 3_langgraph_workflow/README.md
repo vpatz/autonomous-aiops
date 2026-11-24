@@ -47,18 +47,21 @@ telemetry. No cluster, LLM, or MCP servers required.
 ### Agent traces in MLflow
 
 In the cluster, open MLflow → workspace **my-vm-project** → experiment
-**aiops-workflow** → **Traces**. Each graph invocation creates an
-`aiops.workflow` root tagged `aiops.vm`. Expand it to see the detector,
-each RCA iteration, the selector, the executor and any verification/retry
-passes, with timings, routing decisions and final status. Every model call
-appears as a nested `llm <phase>` span (detector, rca-next-action,
-selector-plan) showing its status — `in-flight` until the call settles,
-then `ok` or `failed: …` — plus duration, finish reason, token usage and
-the prompt messages. Prompts are truncated to `LLM_PROMPT_SPAN_CHARS`
+**aiops-workflow** → **Traces**. One trace covers a whole incident run:
+the `aiops.workflow` root opens before detection, so the detector, each
+RCA iteration, the selector, the executor and any verification/retry
+passes appear under it, with timings, routing decisions and final status.
+Every model call appears as a nested `llm <phase>` span (detector,
+rca-next-action, selector-plan) showing its status — `in-flight` until
+the call settles, then `ok` or `failed: …` — plus duration, finish
+reason, token usage and the prompt messages. Prompts are truncated to
+`LLM_PROMPT_SPAN_CHARS`
 (default 7000, `0` to disable) because MLflow caps a span tag at 8000
 characters; `prompt_chars` records the full size and `prompt_truncated`
-marks a cut. Pod logs print one line per call state for live monitoring.
-Spans do not capture model replies, raw tool responses, event URLs or
+marks a cut. Every MCP tool call (and the RCA power-state probe) appears
+as a nested `tool <name>` span with its arguments, an output snippet,
+status and duration. Pod logs print one line per call state for live
+monitoring. Spans do not capture model replies, event URLs or
 credentials.
 
 The workflow uses the MLflow tracing SDK against the internal HTTPS Service,
