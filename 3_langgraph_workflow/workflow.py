@@ -40,6 +40,7 @@ import time
 from http.server import ThreadingHTTPServer
 
 import anomaly_detector
+import agent_tracing
 import collector
 import graph
 import llm
