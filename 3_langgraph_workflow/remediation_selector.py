@@ -155,7 +155,8 @@ def _llm_plan(root_cause, tools, service_name):
         f"Root cause: {json.dumps(root_cause)[:800]}\n"
         f"Approved tools: {json.dumps(catalog)[:1500]}\n"
     )
-    return llm.chat_json([{"role": "user", "content": prompt}], service_name=service_name)
+    return llm.chat_json([{"role": "user", "content": prompt}], service_name=service_name,
+                         phase="selector-plan")
 
 
 def _approved_names(ansible_mcp):
@@ -180,8 +181,8 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False, on_progress=N
             return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                 "findings": [f"[{STEP}] pressure cleanup requires the approved EDA controller template"]})
         if eda:
-            if (service_name in os.environ.get("DASHBOARD_VMS", "").split()
-                    and pressure_incident(workflow_state)):
+            dashboard_vm = service_name in os.environ.get("DASHBOARD_VMS", "").split()
+            if dashboard_vm and pressure_incident(workflow_state):
                 return Command(goto=state.NODE_EXECUTOR, update={
                     "status": state.STATUS_REMEDIATING,
                     "remediation": {"approved_tools": ["cleanup_pressure"], "plan": [
@@ -189,17 +190,32 @@ def build_selector_node(ansible_mcp=None, use_llm=True, eda=False, on_progress=N
                     "findings": [f"[{STEP}] recheck guest pressure and remove a contributing disposable unit"]})
             vm_restart = workflow_state.get("vm_halted") is True
             component = "VirtualMachine" if vm_restart else SERVICE_UNIT
-            if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
-                    or root_cause.get("component") != component
-                    or root_cause.get("confidence") != "high"):
+            if not dashboard_vm:
                 return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                     "findings": [f"[{STEP}] no matching approved EDA restart action"]})
-            tool = "restart_vm" if vm_restart else "restart_service"
-            return Command(goto=state.NODE_EXECUTOR, update={
-                "status": state.STATUS_REMEDIATING,
-                "remediation": {"approved_tools": [tool], "plan": [
-                    {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
-                "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
+            if (root_cause.get("component") == component
+                    and root_cause.get("confidence") == "high"):
+                tool = "restart_vm" if vm_restart else "restart_service"
+                return Command(goto=state.NODE_EXECUTOR, update={
+                    "status": state.STATUS_REMEDIATING,
+                    "remediation": {"approved_tools": [tool], "plan": [
+                        {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
+                    "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
+            if root_cause.get("found") is not False and root_cause.get("confidence") != "high":
+                # Inconclusive RCA: the incident is unresolved, the VM is not a
+                # confirmed halt, and no approved surgical action exists. Reboot
+                # the VM as the blunt fallback (bounded by --max-attempts and
+                # verified against fresh telemetry like every action).
+                return Command(goto=state.NODE_EXECUTOR, update={
+                    "status": state.STATUS_REMEDIATING,
+                    "remediation": {"approved_tools": ["reboot_vm"], "plan": [
+                        {"tool": "reboot_vm", "arguments": {"vm": service_name}}]},
+                    "findings": [f"[{STEP}] RCA inconclusive "
+                                 f"(component {root_cause.get('component') or 'unknown'}, "
+                                 f"{root_cause.get('confidence') or 'unspecified'} confidence); "
+                                 f"request EDA reboot_vm on {service_name}"]})
+            return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                "findings": [f"[{STEP}] no matching approved EDA restart action"]})
         approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
         tools = [{"name": name} for name in approved]
 
@@ -276,13 +292,22 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
         ok = True
         vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
         cleanup = deliver is not None and bool(plan) and plan[0]["tool"] == "cleanup_pressure"
+        reboot = deliver is not None and bool(plan) and plan[0]["tool"] == "reboot_vm"
         if deliver is not None:
             if cleanup and (not pressure_incident(workflow_state) or "cleanup_pressure" not in approved
                             or service_name not in os.environ.get("DASHBOARD_VMS", "").split()):
                 return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                                "findings": [f"[{STEP}] unapproved pressure cleanup"]})
+            if reboot and ("reboot_vm" not in approved
+                           or service_name not in os.environ.get("DASHBOARD_VMS", "").split()
+                           or workflow_state.get("vm_halted") is True):
+                # A confirmed halt must take the restart_vm path, never the
+                # blunt reboot; and only dashboard VMs may be rebooted.
+                return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                               "findings": [f"[{STEP}] unapproved VM reboot"]})
             progress(f"Sending {plan[0]['tool']} to EDA…")
-            action = "cleanup_pressure" if cleanup else ("restart_vm" if vm_restart else "restart")
+            action = ("cleanup_pressure" if cleanup else "reboot_vm" if reboot
+                      else "restart_vm" if vm_restart else "restart")
             eda_record = deliver(build_eda_payload(action, service_name, plan,
                                                    workflow_state.get("root_cause", {})))
             ok = eda_record.get("ok", False)
@@ -327,7 +352,7 @@ def build_executor_node(ansible_mcp=None, get_window=None, verify_wait_seconds=3
             delivery = "EDA accepted the request" if deliver is not None else "Plan executed"
             progress(f"{delivery}; waiting for fresh telemetry to verify recovery…")
             telemetry = get_window(service_name, window_seconds, since=verify_since)
-            deadline = time.monotonic() + max(240 if vm_restart else (90 if cleanup else 0), verify_wait_seconds)
+            deadline = time.monotonic() + max(240 if (vm_restart or reboot) else (90 if cleanup else 0), verify_wait_seconds)
             while time.monotonic() < deadline:
                 ready = pressure_cleared(telemetry) if cleanup else bool(telemetry.get("metrics"))
                 if ready:
@@ -380,7 +405,7 @@ def self_check():
     # Unapproved tools must be rejected before execution.
     class BadLlm:
         @staticmethod
-        def chat_json(messages, service_name=None):
+        def chat_json(messages, service_name=None, phase=None):
             return {"steps": [{"tool": "format_disk", "arguments": {}}], "rationale": "nope"}
 
     saved = llm.chat_json
@@ -474,9 +499,30 @@ def self_check():
             r = build_executor_node(get_window=normal, deliver=accept)(case)
             assert events[-1]["action"] == "cleanup_pressure" and r.goto == state.NODE_DETECTOR
             assert select({**case, "service_name": "other"}).goto == "__end__"
-            assert select({**case, "anomaly": {"signals": [signal, "metrics-silent"]}}).goto == "__end__"
+            silent = select({**case, "anomaly": {"signals": [signal, "metrics-silent"]}})
+            # Not a pressure incident once silent: inconclusive RCA reboots the VM.
+            assert silent.goto == state.NODE_EXECUTOR
+            assert silent.update["remediation"]["plan"][0]["tool"] == "reboot_vm"
         assert not pressure_cleared({"metrics": {"service.cpu.load": 1}})
         assert not pressure_cleared({"metrics": {"service.cpu.load": 81, "service.memory.load": 1}})
+
+        # Inconclusive RCA: reboot the VM instead of giving up.
+        unsolved = {**workflow_state, "root_cause": {"component": "unknown", "confidence": "low",
+                   "found": True, "summary": "no single component isolated"}}
+        fallback = select(unsolved)
+        assert fallback.goto == state.NODE_EXECUTOR
+        assert fallback.update["remediation"]["plan"][0]["tool"] == "reboot_vm"
+        unsolved.update(fallback.update)
+        rebooted = build_executor_node(get_window=get_window, verify_wait_seconds=0,
+                                       deliver=accept)(unsolved)
+        assert rebooted.goto == state.NODE_DETECTOR and events[-1]["action"] == "reboot_vm"
+        # A confident but unapproved diagnosis still refuses to act.
+        assert select({**workflow_state, "root_cause": {"component": "network",
+                   "confidence": "high", "found": True}}).goto == "__end__"
+        # A confirmed halt never takes the blunt reboot path.
+        halted = {**unsolved, "vm_halted": True}
+        refused = build_executor_node(deliver=accept)(halted)
+        assert refused.goto == "__end__" and refused.update["status"] == state.STATUS_FAILED
     rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
     assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 

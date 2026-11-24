@@ -143,7 +143,12 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
 - Keep `rulebooks/restart-aiops.yml` and the controller templates in sync with
   the executor: `restart` starts the unit over SSH; `restart_vm` starts a halted
   VM through the API using `playbooks/vm-recovery-rbac.yaml`. Silence alone
-  does not authorize powering on a VM. `cleanup_pressure` uses guest cgroup
+  does not authorize powering on a VM. `reboot_vm` is the selector's fallback
+  when RCA is inconclusive (incident unresolved, no confirmed halt, no
+  high-confidence approved action): `playbooks/reboot-vm.yml` restarts a running
+  VM through the KubeVirt restart subresource and starts it if found halted;
+  it is bounded by `--max-attempts` and verified against fresh telemetry.
+  `cleanup_pressure` uses guest cgroup
   measurements and a scoped disposable-service policy (`playbooks/cleanup-pressure.yml`).
   RCA may end without dispatch when fresh guest telemetry clears the incident.
   Sync the AAP projects and refresh the

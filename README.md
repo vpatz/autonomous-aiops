@@ -2,7 +2,7 @@
 
 This demo runs a Flask service on four RHEL VMs in OpenShift Virtualization. A load generator calls each VM. A LangGraph workflow uses OpenTelemetry to compare the VM’s metrics, logs, and traces with the HTTP responses its clients receive.
 
-Rules flag problems such as missing telemetry or CPU or memory usage above 80%. An optional LLM summarizes the incident, and the root-cause agent uses Linux MCP tools to investigate. Event-Driven Ansible (EDA) can start a stopped service, start a confirmed halted VM, or remove a disposable workload causing resource pressure. The workflow checks fresh telemetry for recovery; if the problem has already cleared, it takes no action.
+Rules flag problems such as missing telemetry or CPU or memory usage above 80%. An optional LLM summarizes the incident, and the root-cause agent uses Linux MCP tools to investigate. Event-Driven Ansible (EDA) can start a stopped service, start a confirmed halted VM, remove a disposable workload causing resource pressure, or reboot a VM when root-cause analysis is inconclusive. The workflow checks fresh telemetry for recovery; if the problem has already cleared, it takes no action.
 
 **[Follow the demo walkthrough](demo.md)** to inject faults, watch the per-VM dashboard, and inspect the agent’s decisions in MLflow.
 

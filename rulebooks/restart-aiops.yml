@@ -26,6 +26,16 @@
           organization: Default
           job_args:
             limit: "{{ event.payload.service }}"
+    - name: Reboot the requested demo VM after inconclusive RCA
+      condition: >-
+        event.payload.action == "reboot_vm" and
+        event.payload.service in ["rhel10-service-1", "rhel10-service-2", "rhel10-service-3", "rhel10-service-4"]
+      action:
+        run_job_template:
+          name: AIOps - reboot VM
+          organization: Default
+          job_args:
+            limit: "{{ event.payload.service }}"
     - name: Relieve resource pressure on the requested demo VM
       condition: >-
         event.payload.action == "cleanup_pressure" and

@@ -50,8 +50,13 @@ In the cluster, open MLflow → workspace **my-vm-project** → experiment
 **aiops-workflow** → **Traces**. Each graph invocation creates an
 `aiops.workflow` root tagged `aiops.vm`. Expand it to see the detector,
 each RCA iteration, the selector, the executor and any verification/retry
-passes, with timings, routing decisions and final status. Spans do not
-capture raw logs, tool responses, event URLs or credentials.
+passes, with timings, routing decisions and final status. Every model call
+appears as a nested `llm <phase>` span (detector, rca-next-action,
+selector-plan) showing its status — `in-flight` until the call settles,
+then `ok` or `failed: …` — plus duration, finish reason and token usage;
+pod logs print one line per call state for live monitoring. Spans do not
+capture raw logs, tool responses, prompts, model replies, event URLs or
+credentials.
 
 The workflow uses the MLflow tracing SDK against the internal HTTPS Service,
 the OpenShift service CA and `kubernetes-namespaced` authentication with the
@@ -145,13 +150,25 @@ The `AIOps - restore stopped VM` controller template uses `playbooks/restore-vm.
 the existing demo inventory, and **Prompt on launch** for the host limit. It
 runs locally in the execution pod with an encrypted template credential,
 not guest SSH. Apply `playbooks/vm-recovery-rbac.yaml` to authorize only
-reading and starting the four named VMs. Populate the controller credential
+reading, starting, and rebooting the four named VMs. Populate the controller credential
 from the operator-generated `aap/aiops-vm-recovery-token` Secret: inject
 `token` as `AIOPS_VM_TOKEN` and `ca.crt` as a temporary PEM file whose path is
 `AIOPS_VM_CA_FILE`. To rotate, recreate that token Secret and update the
 controller credential. The launcher needs Execute on
 this template. Sync both AAP projects and refresh the activation after changing
 the rulebook. A delayed or repeated event does not reboot an already running VM.
+
+`action: reboot_vm` is the fallback when RCA is inconclusive: the incident is
+unresolved, the VM is not a confirmed halt, and no high-confidence approved
+action exists — for example a guest that stays unreachable through the whole
+investigation. It launches **AIOps - reboot VM**, which runs
+`playbooks/reboot-vm.yml` with the same inventory, credential, and
+**Prompt on launch** limit as the VM-recovery template. The playbook restarts a
+running VM through the KubeVirt restart subresource (the controller recreates
+the VMI) and starts the VM instead when it was found halted. Reboots stay
+bounded by the remediation `--max-attempts` outer loop and are verified
+against fresh telemetry like every other action. A confident diagnosis that
+names an unapproved component still refuses to act.
 
 For `cpu-saturation` or `memory-pressure`, `cleanup_pressure` launches
 **AIOps - clean up resource pressure**, using the demo inventory, machine SSH

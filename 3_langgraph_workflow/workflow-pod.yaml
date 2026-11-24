@@ -154,7 +154,7 @@ data:
     if __name__ == "__main__":
         main()
   agent_tracing.py: |
-    """Optional MLflow spans for an incident and its individual agent invocations."""
+    """Optional MLflow spans for an incident, its agent invocations and its LLM calls."""
 
     from contextlib import contextmanager
     from contextvars import ContextVar
@@ -195,7 +195,7 @@ data:
                 )
             except Exception as exc:
                 _log.warning("MLflow could not start %s (%s)", name, type(exc).__name__)
-        token = _root.set(live) if workflow else None
+        token = _root.set(live) if live is not None else None
         try:
             yield outputs
         except BaseException as exc:
@@ -210,6 +210,41 @@ data:
                     live.end(outputs=outputs, status="ERROR" if failed else "OK")
                 except Exception as exc:
                     _log.warning("MLflow could not finish %s (%s)", name, type(exc).__name__)
+
+
+    @contextmanager
+    def llm_span(service, phase, inputs=None):
+        """One LLM call nested under the current agent span.
+
+        Shows the call's live status ("in-flight" until it settles), duration,
+        finish reason and token usage; never its prompt or reply text.
+        """
+        outputs = {"service": service, "phase": phase}
+        outputs.update(inputs or {})
+        parent = _root.get()
+        live = None
+        if os.environ.get("MLFLOW_TRACKING_URI") and parent is not None:
+            try:
+                live = _client().start_span_no_context(
+                    name=f"llm {phase}", span_type="LLM", parent_span=parent,
+                    inputs=dict(outputs), tags={"aiops.vm": service} if service else None,
+                )
+            except Exception as exc:
+                _log.warning("MLflow could not start llm %s (%s)", phase, type(exc).__name__)
+        try:
+            yield outputs
+        except BaseException as exc:
+            outputs.setdefault("status", "failed")
+            outputs["error_type"] = type(exc).__name__
+            raise
+        finally:
+            if live is not None:
+                try:
+                    failed = ("error_type" in outputs
+                              or str(outputs.get("status", "")).startswith("failed"))
+                    live.end(outputs=outputs, status="ERROR" if failed else "OK")
+                except Exception as exc:
+                    _log.warning("MLflow could not finish llm %s (%s)", phase, type(exc).__name__)
 
 
     def agent(name):
@@ -271,6 +306,7 @@ data:
     import time
     import urllib.error
     import urllib.request
+    import agent_tracing
     from state import ist_timestamp
 
     STEP = "llm client"
@@ -340,29 +376,63 @@ data:
         )
 
 
-    def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=None):
+    def _report(service_name, phase, message):
+        """One progress line per call state, so pod logs show where time goes."""
+        if service_name is not None:
+            print(f"[{ist_timestamp()}] [llm client] {service_name} {phase} {message}", flush=True)
+
+
+    def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=None, phase="call"):
         """One chat completion. Returns {"content": str, "tool_calls": list}."""
         if not available():
             raise LlmError("LLM not configured (set LLM_BASE_URL)")
+        model = config()["model"]
         request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
         if service_name is not None:
             _pacer.wait(service_name)
-            print(f"[{ist_timestamp()}] [llm client] {service_name} model call starting", flush=True)
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                body = json.loads(response.read().decode("utf-8", "replace"))
-        except urllib.error.HTTPError as exc:
-            raise LlmError(f"model endpoint returned HTTP {exc.code}") from exc
-        except OSError as exc:
-            raise LlmError(f"model connection failed ({type(exc).__name__})") from exc
-        try:
-            choice = body["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LlmError("model endpoint returned no chat message") from exc
+            _report(service_name, phase, f"model call starting ({model})")
+        started = time.monotonic()
+        with agent_tracing.llm_span(service_name, phase,
+                                    {"model": model, "max_tokens": max_tokens,
+                                     "tools": len(tools or [])}) as record:
+            record["status"] = "in-flight"
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    body = json.loads(response.read().decode("utf-8", "replace"))
+                record["status"] = "ok"
+            except urllib.error.HTTPError as exc:
+                record["status"] = f"failed: HTTP {exc.code}"
+                _report(service_name, phase,
+                        f"model call failed after {time.monotonic() - started:.1f}s "
+                        f"(endpoint returned HTTP {exc.code})")
+                raise LlmError(f"model endpoint returned HTTP {exc.code}") from exc
+            except OSError as exc:
+                record["status"] = f"failed: {type(exc).__name__}"
+                _report(service_name, phase,
+                        f"model call failed after {time.monotonic() - started:.1f}s "
+                        f"(connection failed: {type(exc).__name__})")
+                raise LlmError(f"model connection failed ({type(exc).__name__})") from exc
+            finally:
+                record["duration_ms"] = round((time.monotonic() - started) * 1000)
+            try:
+                choice = body["choices"][0]["message"]
+            except (KeyError, IndexError, TypeError) as exc:
+                record["status"] = "failed: no chat message in reply"
+                raise LlmError("model endpoint returned no chat message") from exc
+            finish_reason = body["choices"][0].get("finish_reason")
+            record["finish_reason"] = finish_reason
+            usage = body.get("usage") or {}
+            tokens = {key: usage[key] for key in
+                      ("prompt_tokens", "completion_tokens", "total_tokens") if key in usage}
+            if tokens:
+                record["tokens"] = tokens
+            _report(service_name, phase,
+                    f"model call finished in {time.monotonic() - started:.1f}s "
+                    f"(finish_reason={finish_reason})")
         return {
             "content": choice.get("content") or "",
             "tool_calls": choice.get("tool_calls") or [],
-            "finish_reason": body["choices"][0].get("finish_reason"),
+            "finish_reason": finish_reason,
         }
 
 
@@ -387,12 +457,15 @@ data:
         raise LlmError("model reply did not contain valid JSON")
 
 
-    def chat_json(messages, temperature=0.0, max_tokens=1024, service_name=None):
+    def chat_json(messages, temperature=0.0, max_tokens=1024, service_name=None, phase="decision"):
         """Chat completion parsed as a JSON object (agents use JSON decisions)."""
-        reply = chat(messages, temperature=temperature, max_tokens=max_tokens, service_name=service_name)
+        reply = chat(messages, temperature=temperature, max_tokens=max_tokens,
+                     service_name=service_name, phase=phase)
         try:
             return _extract_json(reply["content"])
         except LlmError as exc:
+            _report(service_name, phase,
+                    f"model reply was not usable JSON (finish_reason={reply.get('finish_reason')})")
             if reply.get("finish_reason") == "length":
                 raise IncompleteReply(f"model reached the {max_tokens}-token output limit before returning JSON") from exc
             raise
@@ -441,6 +514,72 @@ data:
             request = build_request([{"role": "user", "content": "hi"}])
             if request.headers.get("Authorization") != "Bearer secret":
                 raise SystemExit(f"{STEP}: bearer token not set")
+
+            # chat(): each call records its status for MLflow and pod logs.
+            import contextlib
+            import sys
+            from unittest.mock import patch
+
+            this = sys.modules[__name__]  # patch the running module, not a second import
+            captured = []
+
+            @contextlib.contextmanager
+            def fake_llm_span(service, phase, inputs=None):
+                record = {"service": service, "phase": phase, **(inputs or {})}
+                captured.append(record)
+                yield record
+
+            reply_body = {
+                "choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+            }
+
+            class FakeResponse:
+                def __init__(self, body):
+                    self._body = body
+
+                def read(self):
+                    return self._body
+
+            def fake_urlopen(request, timeout=None):
+                return contextlib.nullcontext(FakeResponse(json.dumps(reply_body).encode()))
+
+            with patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                    patch.object(urllib.request, "urlopen", fake_urlopen), \
+                    patch.object(this, "_pacer", pacer):
+                reply = chat([{"role": "user", "content": "hi"}],
+                             service_name="vm-9", phase="self-check")
+            if reply["content"] != '{"ok": true}' or reply["finish_reason"] != "stop":
+                raise SystemExit(f"{STEP}: chat reply wrong {reply}")
+            record = captured[-1]
+            if (record["phase"] != "self-check" or record["status"] != "ok"
+                    or "duration_ms" not in record or record["finish_reason"] != "stop"
+                    or record["tokens"]["total_tokens"] != 11):
+                raise SystemExit(f"{STEP}: successful call status not recorded {record}")
+
+            def refuse(request, timeout=None):
+                raise urllib.error.HTTPError(request.full_url, 429, "too many requests", None, None)
+
+            with patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                    patch.object(urllib.request, "urlopen", refuse), \
+                    patch.object(this, "_pacer", pacer):
+                try:
+                    chat([{"role": "user", "content": "hi"}],
+                         service_name="vm-9", phase="self-check")
+                    raise SystemExit(f"{STEP}: HTTP failure should raise LlmError")
+                except LlmError as exc:
+                    if "429" not in str(exc):
+                        raise SystemExit(f"{STEP}: HTTP failure should surface the code: {exc}")
+            record = captured[-1]
+            if (not str(record["status"]).startswith("failed") or "duration_ms" not in record):
+                raise SystemExit(f"{STEP}: failed call status not recorded {record}")
+
+            with patch.object(this, "chat",
+                              return_value={"content": '{"a": 1}', "finish_reason": "stop"}) as fake:
+                parsed = chat_json([{"role": "user", "content": "x"}],
+                                   service_name="vm-9", phase="self-check")
+            if parsed != {"a": 1} or fake.call_args.kwargs.get("phase") != "self-check":
+                raise SystemExit(f"{STEP}: chat_json must pass phase through {fake.call_args}")
         finally:
             for key, value in saved.items():
                 if value is None:
@@ -1958,13 +2097,15 @@ data:
             prompt_bytes = sum(len(msg["content"].encode()) for msg in messages)
             call_started = time.monotonic()
             try:
-                reply = llm.chat_json(messages, service_name=service_name, max_tokens=MODEL_OUTPUT_TOKENS)
+                reply = llm.chat_json(messages, service_name=service_name,
+                                      max_tokens=MODEL_OUTPUT_TOKENS, phase="detector")
             except llm.IncompleteReply as exc:
                 # Reasoning tokens share the output budget with the final JSON.
                 # Retry the identical evidence once, through the normal pacer.
                 retry_tokens = MODEL_OUTPUT_TOKENS * 2
                 print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
-                reply = llm.chat_json(messages, service_name=service_name, max_tokens=retry_tokens)
+                reply = llm.chat_json(messages, service_name=service_name,
+                                      max_tokens=retry_tokens, phase="detector-retry")
             summary = reply.get("summary") if isinstance(reply, dict) else None
             if not isinstance(summary, str) or not summary.strip():
                 raise llm.LlmError("model reply lacks an incident summary")
@@ -2276,7 +2417,7 @@ data:
                               {"role": "user", "content": json.dumps(
                                   {"anomaly": anomaly, "tools": tool_catalog, "investigation": history,
                                    "detector_evidence": evidence}, separators=(",", ":"))}],
-                             service_name=service_name)
+                             service_name=service_name, phase="rca-next-action")
 
 
     def _conclude(investigation):
@@ -2696,7 +2837,7 @@ data:
         saved_chat = llm.chat_json
         captured = {}
 
-        def fake_chat_json(messages, service_name=None):
+        def fake_chat_json(messages, service_name=None, phase=None):
             captured["prompt"] = messages[0]["content"]
             captured["evidence"] = json.loads(messages[1]["content"])["detector_evidence"]
             return {"action": "conclude", "root_cause": {
@@ -2884,7 +3025,8 @@ data:
             f"Root cause: {json.dumps(root_cause)[:800]}\n"
             f"Approved tools: {json.dumps(catalog)[:1500]}\n"
         )
-        return llm.chat_json([{"role": "user", "content": prompt}], service_name=service_name)
+        return llm.chat_json([{"role": "user", "content": prompt}], service_name=service_name,
+                             phase="selector-plan")
 
 
     def _approved_names(ansible_mcp):
@@ -2909,8 +3051,8 @@ data:
                 return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                     "findings": [f"[{STEP}] pressure cleanup requires the approved EDA controller template"]})
             if eda:
-                if (service_name in os.environ.get("DASHBOARD_VMS", "").split()
-                        and pressure_incident(workflow_state)):
+                dashboard_vm = service_name in os.environ.get("DASHBOARD_VMS", "").split()
+                if dashboard_vm and pressure_incident(workflow_state):
                     return Command(goto=state.NODE_EXECUTOR, update={
                         "status": state.STATUS_REMEDIATING,
                         "remediation": {"approved_tools": ["cleanup_pressure"], "plan": [
@@ -2918,17 +3060,32 @@ data:
                         "findings": [f"[{STEP}] recheck guest pressure and remove a contributing disposable unit"]})
                 vm_restart = workflow_state.get("vm_halted") is True
                 component = "VirtualMachine" if vm_restart else SERVICE_UNIT
-                if (service_name not in os.environ.get("DASHBOARD_VMS", "").split()
-                        or root_cause.get("component") != component
-                        or root_cause.get("confidence") != "high"):
+                if not dashboard_vm:
                     return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                         "findings": [f"[{STEP}] no matching approved EDA restart action"]})
-                tool = "restart_vm" if vm_restart else "restart_service"
-                return Command(goto=state.NODE_EXECUTOR, update={
-                    "status": state.STATUS_REMEDIATING,
-                    "remediation": {"approved_tools": [tool], "plan": [
-                        {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
-                    "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
+                if (root_cause.get("component") == component
+                        and root_cause.get("confidence") == "high"):
+                    tool = "restart_vm" if vm_restart else "restart_service"
+                    return Command(goto=state.NODE_EXECUTOR, update={
+                        "status": state.STATUS_REMEDIATING,
+                        "remediation": {"approved_tools": [tool], "plan": [
+                            {"tool": tool, "arguments": {"vm": service_name} if vm_restart else {"service": SERVICE_UNIT}}]},
+                        "findings": [f"[{STEP}] request EDA {tool} on {service_name}"]})
+                if root_cause.get("found") is not False and root_cause.get("confidence") != "high":
+                    # Inconclusive RCA: the incident is unresolved, the VM is not a
+                    # confirmed halt, and no approved surgical action exists. Reboot
+                    # the VM as the blunt fallback (bounded by --max-attempts and
+                    # verified against fresh telemetry like every action).
+                    return Command(goto=state.NODE_EXECUTOR, update={
+                        "status": state.STATUS_REMEDIATING,
+                        "remediation": {"approved_tools": ["reboot_vm"], "plan": [
+                            {"tool": "reboot_vm", "arguments": {"vm": service_name}}]},
+                        "findings": [f"[{STEP}] RCA inconclusive "
+                                     f"(component {root_cause.get('component') or 'unknown'}, "
+                                     f"{root_cause.get('confidence') or 'unspecified'} confidence); "
+                                     f"request EDA reboot_vm on {service_name}"]})
+                return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                    "findings": [f"[{STEP}] no matching approved EDA restart action"]})
             approved = _approved_names(ansible_mcp) if ansible_mcp is not None else []
             tools = [{"name": name} for name in approved]
 
@@ -3005,13 +3162,22 @@ data:
             ok = True
             vm_restart = deliver is not None and workflow_state.get("vm_halted") is True
             cleanup = deliver is not None and bool(plan) and plan[0]["tool"] == "cleanup_pressure"
+            reboot = deliver is not None and bool(plan) and plan[0]["tool"] == "reboot_vm"
             if deliver is not None:
                 if cleanup and (not pressure_incident(workflow_state) or "cleanup_pressure" not in approved
                                 or service_name not in os.environ.get("DASHBOARD_VMS", "").split()):
                     return Command(goto="__end__", update={"status": state.STATUS_FAILED,
                                    "findings": [f"[{STEP}] unapproved pressure cleanup"]})
+                if reboot and ("reboot_vm" not in approved
+                               or service_name not in os.environ.get("DASHBOARD_VMS", "").split()
+                               or workflow_state.get("vm_halted") is True):
+                    # A confirmed halt must take the restart_vm path, never the
+                    # blunt reboot; and only dashboard VMs may be rebooted.
+                    return Command(goto="__end__", update={"status": state.STATUS_FAILED,
+                                   "findings": [f"[{STEP}] unapproved VM reboot"]})
                 progress(f"Sending {plan[0]['tool']} to EDA…")
-                action = "cleanup_pressure" if cleanup else ("restart_vm" if vm_restart else "restart")
+                action = ("cleanup_pressure" if cleanup else "reboot_vm" if reboot
+                          else "restart_vm" if vm_restart else "restart")
                 eda_record = deliver(build_eda_payload(action, service_name, plan,
                                                        workflow_state.get("root_cause", {})))
                 ok = eda_record.get("ok", False)
@@ -3056,7 +3222,7 @@ data:
                 delivery = "EDA accepted the request" if deliver is not None else "Plan executed"
                 progress(f"{delivery}; waiting for fresh telemetry to verify recovery…")
                 telemetry = get_window(service_name, window_seconds, since=verify_since)
-                deadline = time.monotonic() + max(240 if vm_restart else (90 if cleanup else 0), verify_wait_seconds)
+                deadline = time.monotonic() + max(240 if (vm_restart or reboot) else (90 if cleanup else 0), verify_wait_seconds)
                 while time.monotonic() < deadline:
                     ready = pressure_cleared(telemetry) if cleanup else bool(telemetry.get("metrics"))
                     if ready:
@@ -3109,7 +3275,7 @@ data:
         # Unapproved tools must be rejected before execution.
         class BadLlm:
             @staticmethod
-            def chat_json(messages, service_name=None):
+            def chat_json(messages, service_name=None, phase=None):
                 return {"steps": [{"tool": "format_disk", "arguments": {}}], "rationale": "nope"}
 
         saved = llm.chat_json
@@ -3203,9 +3369,30 @@ data:
                 r = build_executor_node(get_window=normal, deliver=accept)(case)
                 assert events[-1]["action"] == "cleanup_pressure" and r.goto == state.NODE_DETECTOR
                 assert select({**case, "service_name": "other"}).goto == "__end__"
-                assert select({**case, "anomaly": {"signals": [signal, "metrics-silent"]}}).goto == "__end__"
+                silent = select({**case, "anomaly": {"signals": [signal, "metrics-silent"]}})
+                # Not a pressure incident once silent: inconclusive RCA reboots the VM.
+                assert silent.goto == state.NODE_EXECUTOR
+                assert silent.update["remediation"]["plan"][0]["tool"] == "reboot_vm"
             assert not pressure_cleared({"metrics": {"service.cpu.load": 1}})
             assert not pressure_cleared({"metrics": {"service.cpu.load": 81, "service.memory.load": 1}})
+
+            # Inconclusive RCA: reboot the VM instead of giving up.
+            unsolved = {**workflow_state, "root_cause": {"component": "unknown", "confidence": "low",
+                       "found": True, "summary": "no single component isolated"}}
+            fallback = select(unsolved)
+            assert fallback.goto == state.NODE_EXECUTOR
+            assert fallback.update["remediation"]["plan"][0]["tool"] == "reboot_vm"
+            unsolved.update(fallback.update)
+            rebooted = build_executor_node(get_window=get_window, verify_wait_seconds=0,
+                                           deliver=accept)(unsolved)
+            assert rebooted.goto == state.NODE_DETECTOR and events[-1]["action"] == "reboot_vm"
+            # A confident but unapproved diagnosis still refuses to act.
+            assert select({**workflow_state, "root_cause": {"component": "network",
+                       "confidence": "high", "found": True}}).goto == "__end__"
+            # A confirmed halt never takes the blunt reboot path.
+            halted = {**unsolved, "vm_halted": True}
+            refused = build_executor_node(deliver=accept)(halted)
+            assert refused.goto == "__end__" and refused.update["status"] == state.STATUS_FAILED
         rejected = build_executor_node(deliver=lambda _: {"ok": False, "status": "rejected HTTP 401"})(workflow_state)
         assert rejected.goto == "__end__" and rejected.update["status"] == state.STATUS_FAILED
 
