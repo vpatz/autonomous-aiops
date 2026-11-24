@@ -29,6 +29,10 @@ concurrently.
 
 ## Usage
 
+In OpenCode, use `/chaos` with a plain-language description, e.g.
+`/chaos high CPU on vm1 for 120 secs` or `/chaos preview block telemetry on vm3 for 45s`.
+For `stress-host`, `--stress-resource cpu|memory|both` selects the load; the default is `both`.
+
 ```sh
 python3 4_chaos_injector/chaos_injector.py --list                 # scenarios
 python3 4_chaos_injector/chaos_injector.py --dry-run              # random plan, no action

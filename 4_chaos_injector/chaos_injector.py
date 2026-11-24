@@ -92,12 +92,14 @@ def main():
     blob = bytearray(hold)  # allocated and zeroed, so the pages are resident
     workers = [
         multiprocessing.Process(target=cpu_worker)
-        for _ in range(multiprocessing.cpu_count())
+        for _ in range(multiprocessing.cpu_count() if DUTY else 0)
     ]
     for worker in workers:
         worker.start()
     for worker in workers:
         worker.join()
+    if not workers:
+        time.sleep(DURATION)  # retain the allocation for memory-only stress
 
 
 main()
@@ -288,16 +290,17 @@ def scenario_stress_host(vm, runner, cfg):
     VM itself, so the true telemetry raises cpu-saturation/memory-pressure
     and the RCA can cross-check real load through linux-mcp's PCP tools.
     The stress unit self-terminates; no recovery timer is needed."""
+    resource = cfg.stress_resource
     script = STRESS_TEMPLATE.format(
-        duration=cfg.stress_seconds, duty=STRESS_CPU_DUTY, free=STRESS_MEMORY_FREE
-    )
+        duration=cfg.stress_seconds, duty=0 if resource == "memory" else STRESS_CPU_DUTY,
+        free=1.0 if resource == "cpu" else STRESS_MEMORY_FREE)
     payload = base64.b64encode(script.encode()).decode()
     runner.ssh(
         vm,
         f"echo '{payload}' | base64 -d > /tmp/aiops-chaos-stress.py"
         f" && sudo -n systemd-run --unit={_unit_tag('chaos-stress', vm)}"
-        f" python3 /tmp/aiops-chaos-stress.py",
-        f"drive host CPU and memory to ~90% for {cfg.stress_seconds}s"
+        f" --property=RuntimeMaxSec={cfg.stress_seconds} python3 /tmp/aiops-chaos-stress.py",
+        f"drive host {resource if resource != 'both' else 'CPU and memory'} to ~90% for {cfg.stress_seconds}s"
         f" (self-terminating stress unit)",
     )
 
@@ -460,6 +463,8 @@ def main():
     parser.add_argument("--network-seconds", type=int, default=60)
     parser.add_argument("--telemetry-seconds", type=int, default=30)
     parser.add_argument("--stress-seconds", type=int, default=30)
+    parser.add_argument("--stress-resource", choices=["cpu", "memory", "both"], default="both",
+                        help="resource to load during stress-host (default: both)")
     parser.add_argument("--duration", type=int, default=60,
                         help="alter-telemetry duration")
     parser.add_argument("--alter-mode", choices=["zeros", "spike", "random"], default="random")
@@ -553,6 +558,7 @@ def self_check():
         network_seconds = 60
         telemetry_seconds = 30
         stress_seconds = 30
+        stress_resource = "both"
         duration = 60
         alter_mode = "zeros"
 
