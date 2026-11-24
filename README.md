@@ -10,9 +10,28 @@ For a terminal-only run without a cluster, see [Offline testing](offline-testing
 
 ## Run it on OpenShift
 
-Log in to the target cluster with `oc`. In OpenCode, run [`/prep-cluster`](.opencode/commands/prep-cluster.md) to install the platform prerequisites, then [`/deploy-demo`](.opencode/commands/deploy-demo.md) to deploy the demo and print the **AIOps dashboard** and **MLflow** URLs.
+Log in to the target cluster with `oc`. In OpenCode, run [`/prep-cluster`](.opencode/commands/prep-cluster.md), configure the optional LLM Secret below, then run [`/deploy-demo`](.opencode/commands/deploy-demo.md) to deploy the demo and print the **AIOps dashboard** and **MLflow** URLs.
 
-For manual deployment:
+### Set the LLM URL and API key
+
+After `my-vm-project` exists, create a private file `~/.config/aiops/llm.env` outside the checkout (permissions `600`). Enter your provider's OpenAI-compatible base URL, including `/v1`, and its API key. Add `LLM_MODEL` only if you need to override the workflow default.
+
+```dotenv
+LLM_BASE_URL=https://your-llm-host.example/v1
+LLM_API_KEY=your-provider-api-key
+```
+
+From the repo root, create or update the Secret without printing the key:
+
+```sh
+oc -n my-vm-project create secret generic llm-config \
+  --from-env-file="$HOME/.config/aiops/llm.env" --dry-run=client -o yaml |
+  oc apply --server-side -f -
+```
+
+On a first deployment, the workflow reads the Secret at startup. If it is already running, reload the settings with `oc -n my-vm-project delete pod aiops-workflow` followed by `oc apply -f 3_langgraph_workflow/workflow-pod.yaml`. See [LLM integration](3_langgraph_workflow/README.md#integrating-an-llm) for endpoint testing.
+
+### Manual deployment
 
 1. Follow the [cluster setup guide](0_cluster_setup/README.md) to provision the four VMs, their SSH credentials, and Linux MCP in `my-vm-project`.
 2. Configure an [LLM endpoint](3_langgraph_workflow/README.md#integrating-an-llm) for model-assisted investigation and [EDA](3_langgraph_workflow/README.md#dispatch-to-in-cluster-event-driven-ansible) for real recovery. Without EDA, the default executor is a mock. **On a new cluster**, copy the event stream’s full HTTPS POST URL and matching credentials into `eda-config`; changing the hostname alone is not enough.
