@@ -14,7 +14,7 @@ For a terminal-only run without a cluster, see [Offline testing](offline-testing
 
 Log in to the target cluster with `oc`. From this repository in OpenCode, run [`/prep-cluster`](.opencode/commands/prep-cluster.md) and wait for the platform prerequisites and `my-vm-project` namespace to be ready.
 
-### 2. Set the LLM URL and API key (optional)
+### 2. Set the LLM URL and API key
 
 After `my-vm-project` exists, create a private file `~/.config/aiops/llm.env` outside the checkout (permissions `600`). Enter your provider's OpenAI-compatible base URL, including `/v1`, and its API key. Add `LLM_MODEL` only if you need to override the workflow default.
 
