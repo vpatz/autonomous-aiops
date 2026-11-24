@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import agent_tracing
 from state import ist_timestamp
 
 STEP = "llm client"
@@ -97,29 +98,63 @@ def build_request(messages, tools=None, temperature=0.0, max_tokens=1024):
     )
 
 
-def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=None):
+def _report(service_name, phase, message):
+    """One progress line per call state, so pod logs show where time goes."""
+    if service_name is not None:
+        print(f"[{ist_timestamp()}] [llm client] {service_name} {phase} {message}", flush=True)
+
+
+def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=None, phase="call"):
     """One chat completion. Returns {"content": str, "tool_calls": list}."""
     if not available():
         raise LlmError("LLM not configured (set LLM_BASE_URL)")
+    model = config()["model"]
     request = build_request(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
     if service_name is not None:
         _pacer.wait(service_name)
-        print(f"[{ist_timestamp()}] [llm client] {service_name} model call starting", flush=True)
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            body = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        raise LlmError(f"model endpoint returned HTTP {exc.code}") from exc
-    except OSError as exc:
-        raise LlmError(f"model connection failed ({type(exc).__name__})") from exc
-    try:
-        choice = body["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LlmError("model endpoint returned no chat message") from exc
+        _report(service_name, phase, f"model call starting ({model})")
+    started = time.monotonic()
+    with agent_tracing.llm_span(service_name, phase,
+                                {"model": model, "max_tokens": max_tokens,
+                                 "tools": len(tools or [])}) as record:
+        record["status"] = "in-flight"
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                body = json.loads(response.read().decode("utf-8", "replace"))
+            record["status"] = "ok"
+        except urllib.error.HTTPError as exc:
+            record["status"] = f"failed: HTTP {exc.code}"
+            _report(service_name, phase,
+                    f"model call failed after {time.monotonic() - started:.1f}s "
+                    f"(endpoint returned HTTP {exc.code})")
+            raise LlmError(f"model endpoint returned HTTP {exc.code}") from exc
+        except OSError as exc:
+            record["status"] = f"failed: {type(exc).__name__}"
+            _report(service_name, phase,
+                    f"model call failed after {time.monotonic() - started:.1f}s "
+                    f"(connection failed: {type(exc).__name__})")
+            raise LlmError(f"model connection failed ({type(exc).__name__})") from exc
+        finally:
+            record["duration_ms"] = round((time.monotonic() - started) * 1000)
+        try:
+            choice = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            record["status"] = "failed: no chat message in reply"
+            raise LlmError("model endpoint returned no chat message") from exc
+        finish_reason = body["choices"][0].get("finish_reason")
+        record["finish_reason"] = finish_reason
+        usage = body.get("usage") or {}
+        tokens = {key: usage[key] for key in
+                  ("prompt_tokens", "completion_tokens", "total_tokens") if key in usage}
+        if tokens:
+            record["tokens"] = tokens
+        _report(service_name, phase,
+                f"model call finished in {time.monotonic() - started:.1f}s "
+                f"(finish_reason={finish_reason})")
     return {
         "content": choice.get("content") or "",
         "tool_calls": choice.get("tool_calls") or [],
-        "finish_reason": body["choices"][0].get("finish_reason"),
+        "finish_reason": finish_reason,
     }
 
 
@@ -144,12 +179,15 @@ def _extract_json(text):
     raise LlmError("model reply did not contain valid JSON")
 
 
-def chat_json(messages, temperature=0.0, max_tokens=1024, service_name=None):
+def chat_json(messages, temperature=0.0, max_tokens=1024, service_name=None, phase="decision"):
     """Chat completion parsed as a JSON object (agents use JSON decisions)."""
-    reply = chat(messages, temperature=temperature, max_tokens=max_tokens, service_name=service_name)
+    reply = chat(messages, temperature=temperature, max_tokens=max_tokens,
+                 service_name=service_name, phase=phase)
     try:
         return _extract_json(reply["content"])
     except LlmError as exc:
+        _report(service_name, phase,
+                f"model reply was not usable JSON (finish_reason={reply.get('finish_reason')})")
         if reply.get("finish_reason") == "length":
             raise IncompleteReply(f"model reached the {max_tokens}-token output limit before returning JSON") from exc
         raise
@@ -198,6 +236,72 @@ def self_check():
         request = build_request([{"role": "user", "content": "hi"}])
         if request.headers.get("Authorization") != "Bearer secret":
             raise SystemExit(f"{STEP}: bearer token not set")
+
+        # chat(): each call records its status for MLflow and pod logs.
+        import contextlib
+        import sys
+        from unittest.mock import patch
+
+        this = sys.modules[__name__]  # patch the running module, not a second import
+        captured = []
+
+        @contextlib.contextmanager
+        def fake_llm_span(service, phase, inputs=None):
+            record = {"service": service, "phase": phase, **(inputs or {})}
+            captured.append(record)
+            yield record
+
+        reply_body = {
+            "choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11},
+        }
+
+        class FakeResponse:
+            def __init__(self, body):
+                self._body = body
+
+            def read(self):
+                return self._body
+
+        def fake_urlopen(request, timeout=None):
+            return contextlib.nullcontext(FakeResponse(json.dumps(reply_body).encode()))
+
+        with patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                patch.object(urllib.request, "urlopen", fake_urlopen), \
+                patch.object(this, "_pacer", pacer):
+            reply = chat([{"role": "user", "content": "hi"}],
+                         service_name="vm-9", phase="self-check")
+        if reply["content"] != '{"ok": true}' or reply["finish_reason"] != "stop":
+            raise SystemExit(f"{STEP}: chat reply wrong {reply}")
+        record = captured[-1]
+        if (record["phase"] != "self-check" or record["status"] != "ok"
+                or "duration_ms" not in record or record["finish_reason"] != "stop"
+                or record["tokens"]["total_tokens"] != 11):
+            raise SystemExit(f"{STEP}: successful call status not recorded {record}")
+
+        def refuse(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 429, "too many requests", None, None)
+
+        with patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                patch.object(urllib.request, "urlopen", refuse), \
+                patch.object(this, "_pacer", pacer):
+            try:
+                chat([{"role": "user", "content": "hi"}],
+                     service_name="vm-9", phase="self-check")
+                raise SystemExit(f"{STEP}: HTTP failure should raise LlmError")
+            except LlmError as exc:
+                if "429" not in str(exc):
+                    raise SystemExit(f"{STEP}: HTTP failure should surface the code: {exc}")
+        record = captured[-1]
+        if (not str(record["status"]).startswith("failed") or "duration_ms" not in record):
+            raise SystemExit(f"{STEP}: failed call status not recorded {record}")
+
+        with patch.object(this, "chat",
+                          return_value={"content": '{"a": 1}', "finish_reason": "stop"}) as fake:
+            parsed = chat_json([{"role": "user", "content": "x"}],
+                               service_name="vm-9", phase="self-check")
+        if parsed != {"a": 1} or fake.call_args.kwargs.get("phase") != "self-check":
+            raise SystemExit(f"{STEP}: chat_json must pass phase through {fake.call_args}")
     finally:
         for key, value in saved.items():
             if value is None:

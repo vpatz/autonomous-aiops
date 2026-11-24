@@ -156,13 +156,15 @@ def summarize_incident(service_name, window, anomaly, silence_seconds, use_llm=T
         prompt_bytes = sum(len(msg["content"].encode()) for msg in messages)
         call_started = time.monotonic()
         try:
-            reply = llm.chat_json(messages, service_name=service_name, max_tokens=MODEL_OUTPUT_TOKENS)
+            reply = llm.chat_json(messages, service_name=service_name,
+                                  max_tokens=MODEL_OUTPUT_TOKENS, phase="detector")
         except llm.IncompleteReply as exc:
             # Reasoning tokens share the output budget with the final JSON.
             # Retry the identical evidence once, through the normal pacer.
             retry_tokens = MODEL_OUTPUT_TOKENS * 2
             print(f"[{state.ist_timestamp()}] [{STEP}] {service_name}: {exc}; retrying with {retry_tokens} tokens", flush=True)
-            reply = llm.chat_json(messages, service_name=service_name, max_tokens=retry_tokens)
+            reply = llm.chat_json(messages, service_name=service_name,
+                                  max_tokens=retry_tokens, phase="detector-retry")
         summary = reply.get("summary") if isinstance(reply, dict) else None
         if not isinstance(summary, str) or not summary.strip():
             raise llm.LlmError("model reply lacks an incident summary")

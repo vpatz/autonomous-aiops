@@ -1,4 +1,4 @@
-"""Optional MLflow spans for an incident and its individual agent invocations."""
+"""Optional MLflow spans for an incident, its agent invocations and its LLM calls."""
 
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -39,7 +39,7 @@ def span(name, inputs, *, workflow=False):
             )
         except Exception as exc:
             _log.warning("MLflow could not start %s (%s)", name, type(exc).__name__)
-    token = _root.set(live) if workflow else None
+    token = _root.set(live) if live is not None else None
     try:
         yield outputs
     except BaseException as exc:
@@ -54,6 +54,41 @@ def span(name, inputs, *, workflow=False):
                 live.end(outputs=outputs, status="ERROR" if failed else "OK")
             except Exception as exc:
                 _log.warning("MLflow could not finish %s (%s)", name, type(exc).__name__)
+
+
+@contextmanager
+def llm_span(service, phase, inputs=None):
+    """One LLM call nested under the current agent span.
+
+    Shows the call's live status ("in-flight" until it settles), duration,
+    finish reason and token usage; never its prompt or reply text.
+    """
+    outputs = {"service": service, "phase": phase}
+    outputs.update(inputs or {})
+    parent = _root.get()
+    live = None
+    if os.environ.get("MLFLOW_TRACKING_URI") and parent is not None:
+        try:
+            live = _client().start_span_no_context(
+                name=f"llm {phase}", span_type="LLM", parent_span=parent,
+                inputs=dict(outputs), tags={"aiops.vm": service} if service else None,
+            )
+        except Exception as exc:
+            _log.warning("MLflow could not start llm %s (%s)", phase, type(exc).__name__)
+    try:
+        yield outputs
+    except BaseException as exc:
+        outputs.setdefault("status", "failed")
+        outputs["error_type"] = type(exc).__name__
+        raise
+    finally:
+        if live is not None:
+            try:
+                failed = ("error_type" in outputs
+                          or str(outputs.get("status", "")).startswith("failed"))
+                live.end(outputs=outputs, status="ERROR" if failed else "OK")
+            except Exception as exc:
+                _log.warning("MLflow could not finish llm %s (%s)", phase, type(exc).__name__)
 
 
 def agent(name):
