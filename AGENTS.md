@@ -83,7 +83,9 @@ additionally require `EDA_EVENT_URL` and `EDA_EVENT_PASSWORD`.
   from decreasing `service.uptime` samples, anomaly/RCA/remediation rows with
   progress bars, and a text area of the last 30s of received messages
   (`TelemetryStore.messages`: one line per OTLP export, SDK-internal metrics
-  filtered out). `/api/dashboard` includes findings across VMs
+  filtered out). A new workflow run clears that VM's card: the run state and
+  the accumulated anomaly-summary history are reset when the run starts.
+  `/api/dashboard` includes findings across VMs
   (from the run `findings` channel, newest last). EDA acceptance is not proof of
   recovery: check the controller job and fresh post-action telemetry.
 - Stage 4 (`4_chaos_injector/chaos_injector.py`) injects the eight demo scenarios

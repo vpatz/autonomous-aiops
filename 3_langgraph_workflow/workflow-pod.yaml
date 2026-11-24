@@ -3939,6 +3939,16 @@ data:
                 cls.revision += 1
                 cls.changed.notify_all()
 
+        @classmethod
+        def start_run(cls, service):
+            """A new run resets the card's text areas: the previous incident
+            summary history is cleared along with the run state."""
+            with cls.changed:
+                cls.runs[service] = {"running": True, "updated_at": state.utc_timestamp()}
+                cls.model_results.pop(service, None)
+                cls.revision += 1
+                cls.changed.notify_all()
+
         def stream_changes(self):
             """Notify browsers of new state; never hold the runs lock during network writes."""
             self.send_response(200)
@@ -4429,7 +4439,9 @@ data:
 
         function updateCard(svc, refs) {
           const vm = svc.vm, service = svc.service;
-          const summaries = svc.incident_lines.join('\n') || 'No rule-detected incident reported.';
+          const summaries = svc.incident_lines.join('\n')
+            || (svc.run && svc.run.status === 'running' ? 'New workflow started; awaiting first summary.'
+                                                         : 'No rule-detected incident reported.');
           refs.modelLabel.textContent = `Anomaly summaries (${svc.incident_lines.length} lines, newest last)`;
           if (refs.modelBox.value !== summaries) {
             refs.modelBox.value = summaries;
@@ -4557,7 +4569,7 @@ data:
             try:
                 incident_since = time.monotonic()
                 snapshot = {}
-                WorkflowHandler.publish_run(service_name, {"running": True})
+                WorkflowHandler.start_run(service_name)
                 anomaly = anomaly_detector.summarize_incident(
                     service_name, telemetry, trigger, args.silence_seconds,
                     get_evidence=store.recent_evidence, on_model_result=WorkflowHandler.record_model_result,
@@ -4721,6 +4733,13 @@ data:
                                        model_results=WorkflowHandler.model_results)
             refreshed_card = next(c for c in refreshed["services"] if c["name"] == "vm-1")
             assert refreshed_card["incident_lines"][:-1] == lines and refreshed_card["detector_llm"] == prev
+            # A new workflow run clears the card's incident summary history.
+            WorkflowHandler.start_run("vm-1")
+            restarted = dashboard_data(history, WorkflowHandler.runs, WorkflowHandler.runs_lock,
+                                       model_results=WorkflowHandler.model_results)
+            restarted_card = next(c for c in restarted["services"] if c["name"] == "vm-1")
+            assert (restarted_card["incident_lines"] == [] and restarted_card["detector_llm"] is None
+                    and restarted_card["run"]["status"] == "running")
             assert "verification · rules · low: CPU exceeded 80%." in lines[-1] and "\n" not in lines[-1]
             payload = json.loads(chat.call_args.args[0][1]["content"])
             assert payload["lookback_seconds"] == 10
