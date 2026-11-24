@@ -53,9 +53,12 @@ each RCA iteration, the selector, the executor and any verification/retry
 passes, with timings, routing decisions and final status. Every model call
 appears as a nested `llm <phase>` span (detector, rca-next-action,
 selector-plan) showing its status — `in-flight` until the call settles,
-then `ok` or `failed: …` — plus duration, finish reason and token usage;
-pod logs print one line per call state for live monitoring. Spans do not
-capture raw logs, tool responses, prompts, model replies, event URLs or
+then `ok` or `failed: …` — plus duration, finish reason, token usage and
+the prompt messages. Prompts are truncated to `LLM_PROMPT_SPAN_CHARS`
+(default 7000, `0` to disable) because MLflow caps a span tag at 8000
+characters; `prompt_chars` records the full size and `prompt_truncated`
+marks a cut. Pod logs print one line per call state for live monitoring.
+Spans do not capture model replies, raw tool responses, event URLs or
 credentials.
 
 The workflow uses the MLflow tracing SDK against the internal HTTPS Service,

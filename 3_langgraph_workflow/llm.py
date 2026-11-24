@@ -35,6 +35,39 @@ STEP = "llm client"
 DEFAULT_MODEL = "rits/meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
 VM_CALL_INTERVAL = 10
 CALL_START_GAP = 5
+DEFAULT_PROMPT_SPAN_CHARS = 7000  # MLflow caps a span-tag value at 8000 chars
+
+
+def prompt_span_budget():
+    """Character budget for prompts recorded in MLflow spans (0 disables)."""
+    try:
+        return max(0, int(os.environ.get("LLM_PROMPT_SPAN_CHARS", str(DEFAULT_PROMPT_SPAN_CHARS))))
+    except ValueError:
+        return DEFAULT_PROMPT_SPAN_CHARS
+
+
+def _message_text(message):
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+def _prompt_for_span(messages, budget):
+    """Prompt copy for the MLflow span: full when it fits, truncated in place
+    otherwise (with a visible marker — MLflow would otherwise cut the whole
+    serialized input silently at its 8000-character span-tag limit)."""
+    record, used, truncated = [], 0, False
+    for message in messages:
+        text = _message_text(message)
+        remaining = budget - used
+        if len(text) > remaining:
+            cut = text[:max(remaining, 0)] + "…[truncated]"
+            record.append({**message, "content": cut} if isinstance(message, dict)
+                          else {"content": cut})
+            used, truncated = budget, True
+        else:
+            record.append(message)
+            used += len(text)
+    return record, truncated
 
 
 class CallPacer:
@@ -114,9 +147,14 @@ def chat(messages, tools=None, temperature=0.0, max_tokens=1024, service_name=No
         _pacer.wait(service_name)
         _report(service_name, phase, f"model call starting ({model})")
     started = time.monotonic()
-    with agent_tracing.llm_span(service_name, phase,
-                                {"model": model, "max_tokens": max_tokens,
-                                 "tools": len(tools or [])}) as record:
+    span_inputs = {"model": model, "max_tokens": max_tokens, "tools": len(tools or []),
+                   "prompt_chars": sum(len(_message_text(m)) for m in messages)}
+    budget = prompt_span_budget()
+    if budget:
+        span_inputs["messages"], truncated = _prompt_for_span(messages, budget)
+        if truncated:
+            span_inputs["prompt_truncated"] = True
+    with agent_tracing.llm_span(service_name, phase, span_inputs) as record:
         record["status"] = "in-flight"
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
@@ -302,6 +340,29 @@ def self_check():
                                service_name="vm-9", phase="self-check")
         if parsed != {"a": 1} or fake.call_args.kwargs.get("phase") != "self-check":
             raise SystemExit(f"{STEP}: chat_json must pass phase through {fake.call_args}")
+
+        # Prompts are recorded in the span, truncated visibly to the budget.
+        record = captured[0]
+        if record["messages"] != [{"role": "user", "content": "hi"}] or record["prompt_chars"] != 2:
+            raise SystemExit(f"{STEP}: prompt not recorded in span {record}")
+        with patch.dict(os.environ, {"LLM_PROMPT_SPAN_CHARS": "5"}), \
+                patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                patch.object(urllib.request, "urlopen", fake_urlopen), \
+                patch.object(this, "_pacer", pacer):
+            chat([{"role": "system", "content": "abcdefghij"},
+                  {"role": "user", "content": "hi"}], service_name="vm-9", phase="self-check")
+        record = captured[-1]
+        if (record.get("prompt_truncated") is not True or record["prompt_chars"] != 12
+                or record["messages"][0]["content"] != "abcde…[truncated]"
+                or record["messages"][1]["content"] != "…[truncated]"):
+            raise SystemExit(f"{STEP}: prompt truncation wrong {record}")
+        with patch.dict(os.environ, {"LLM_PROMPT_SPAN_CHARS": "0"}), \
+                patch.object(agent_tracing, "llm_span", fake_llm_span), \
+                patch.object(urllib.request, "urlopen", fake_urlopen), \
+                patch.object(this, "_pacer", pacer):
+            chat([{"role": "user", "content": "hi"}], service_name="vm-9", phase="self-check")
+        if "messages" in captured[-1] or captured[-1]["prompt_chars"] != 2:
+            raise SystemExit(f"{STEP}: budget 0 must omit the prompt {captured[-1]}")
     finally:
         for key, value in saved.items():
             if value is None:

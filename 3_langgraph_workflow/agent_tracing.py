@@ -61,7 +61,8 @@ def llm_span(service, phase, inputs=None):
     """One LLM call nested under the current agent span.
 
     Shows the call's live status ("in-flight" until it settles), duration,
-    finish reason and token usage; never its prompt or reply text.
+    finish reason, token usage and the prompt messages (the caller truncates
+    them to the span budget; MLflow caps span tags at 8000 characters).
     """
     outputs = {"service": service, "phase": phase}
     outputs.update(inputs or {})
@@ -95,7 +96,8 @@ def agent(name):
     def decorate(node):
         @wraps(node)
         def traced(state):
-            # Record decisions, not raw state (journal output, prompts or credentials).
+            # Record decisions, not raw state (journal output or credentials);
+            # LLM prompts are captured in their own nested spans instead.
             inputs = {"service": state["service_name"], "iteration": state.get("iteration", 0),
                       "attempts": state.get("attempts", 0)}
             with span(name, inputs) as out:
