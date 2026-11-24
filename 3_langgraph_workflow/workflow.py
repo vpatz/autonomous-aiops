@@ -399,7 +399,7 @@ def render_dashboard_shell():
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Agentic AI Ops Dashboard</title>
+  <title>Autonomous AI Ops Dashboard</title>
   <style>
     :root {
       --bg: #0b1220; --card: #141d30; --edge: #293548; --ink: #e6edf6;
@@ -468,7 +468,7 @@ def render_dashboard_shell():
 </head>
 <body>
   <header>
-    <h1>Agentic AI Ops Dashboard</h1>
+    <h1>Autonomous AI Ops Dashboard</h1>
     <div class="stats" id="stats">loading&hellip;</div>
   </header>
   <main class="grid" id="cards"></main>
