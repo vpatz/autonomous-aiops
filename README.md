@@ -49,7 +49,7 @@ Run [`/deploy-demo`](.opencode/commands/deploy-demo.md) in OpenCode. It deploys 
    echo "https://$(oc -n my-vm-project get route aiops-workflow -o jsonpath='{.spec.host}')"
    ```
 
-## Inject a fault with OpenCode
+### 4. Inject a fault with OpenCode
 
 Once the dashboard shows **flowing** for the target VM, use [`/chaos`](.opencode/commands/chaos.md) in OpenCode. Run `/chaos` by itself to list scenarios. For example:
 
